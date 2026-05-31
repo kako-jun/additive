@@ -154,7 +154,8 @@ impl Default for OrbConfig {
         Self {
             count: DEFAULT_COUNT,
             speed: DEFAULT_SPEED,
-            direction: OrbDirection::Lr,
+            // rl (right→left) is the primary use case — the default sweep direction.
+            direction: OrbDirection::Rl,
             orb_size: DEFAULT_ORB_SIZE,
         }
     }
