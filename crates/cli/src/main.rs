@@ -29,7 +29,7 @@ enum Renderer {
     Gpu,
 }
 
-/// Conveyor drift direction for the No.13 orb curtain (`--direction`).
+/// Conveyor sweep direction for the No.13 orb band (`--direction`).
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
 enum Direction {
     /// Left → right.
@@ -111,7 +111,7 @@ struct Cli {
     #[arg(long, value_enum, default_value_t = Renderer::Gpu)]
     renderer: Renderer,
 
-    /// No.13 orb-dissolve: number of orbs in the curtain (clamped to 1..=128).
+    /// No.13 orb-dissolve: number of orbs in the band (clamped to 1..=128).
     /// Ignored by other transitions.
     #[arg(long, value_name = "N")]
     count: Option<u32>,

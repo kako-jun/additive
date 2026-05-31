@@ -45,6 +45,8 @@ struct Orb {
 };
 
 struct Orbs {
+    // Length must stay in sync with MAX_ORBS (orb_dissolve.rs / gpu.rs). WGSL
+    // requires a literal here, so it cannot reference the const above.
     orbs: array<Orb, 128>,
 };
 

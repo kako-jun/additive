@@ -7,12 +7,12 @@ another. Each additive is a pure function of normalized time `t`:
 (from image, to image, t in 0..1)  ->  RGBA frame
 ```
 
-The flagship, **No.13 — orb-dissolve**, raises a curtain of color orbs that
-**fully covers** the *from* image at the peak, hard-swaps the base to *to*
-underneath the cover, then clears the curtain to reveal *to* — a cover-then-swap
-wipe (`--count` / `--speed` / `--direction` / `--orb-size` tune the curtain). (The
-name nods to パトレイバー's 廃棄物13号 and to the way food additives are catalogued
-by number.)
+The flagship, **No.13 — orb-dissolve**, sweeps a band of *from*-colored orbs
+across the frame in one direction (right→left by default): everything the band has
+already passed is *to*, everything ahead is still *from*, and the from→to seam is
+always hidden inside the moving band of orbs (`--count` / `--speed` / `--direction`
+/ `--orb-size` tune the sweep). (The name nods to パトレイバー's 廃棄物13号 and to the
+way food additives are catalogued by number.)
 
 > **Status:** prototype scaffold. The reference CPU renderer works end-to-end
 > (`No.0 — crossfade`); the production wgpu renderer and `No.13 — orb-dissolve`

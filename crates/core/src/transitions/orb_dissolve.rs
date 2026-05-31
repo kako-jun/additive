@@ -239,7 +239,9 @@ impl OrbDissolve {
     pub fn orb_instances(from: &RgbaImage, cfg: &OrbConfig, t: f32) -> Vec<OrbInstance> {
         let t = t.clamp(0.0, 1.0);
         let count = cfg.count.clamp(1, MAX_ORBS as u32) as usize;
-        let size = cfg.orb_size.max(0.0);
+        // Floor the multiplier so orbs always have positive radius — orb_size 0
+        // (or negative) would draw no orbs and expose the raw from→to seam.
+        let size = cfg.orb_size.max(0.05);
 
         // Grid: many cross-axis cells (cover the band width), a few flow-axis
         // cells (give the band depth). Aim for a wide, thin lattice.
