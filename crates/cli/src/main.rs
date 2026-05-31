@@ -6,10 +6,20 @@
 
 use std::path::PathBuf;
 
-use additive_core::{all, by_name, timeline};
+use additive_core::{all, by_name, timeline, GpuRenderer, Transition};
 use anyhow::{bail, Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use image::imageops::FilterType;
+use image::RgbaImage;
+
+/// Which renderer backend to drive.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
+enum Renderer {
+    /// Reference CPU renderer (the parity oracle).
+    Cpu,
+    /// Production wgpu (Rust + WGSL) renderer; falls back to CPU if no GPU.
+    Gpu,
+}
 
 #[derive(Parser)]
 #[command(
@@ -49,6 +59,44 @@ struct Cli {
     /// List available transitions and exit.
     #[arg(long)]
     list: bool,
+
+    /// Renderer backend: the production `gpu` (wgpu) path or the `cpu` reference.
+    #[arg(long, value_enum, default_value_t = Renderer::Gpu)]
+    renderer: Renderer,
+}
+
+/// Renders frames with the selected backend, falling back from GPU to CPU when
+/// no adapter is available.
+enum FrameRenderer {
+    Cpu,
+    Gpu(GpuRenderer),
+}
+
+impl FrameRenderer {
+    /// Build the requested renderer. `Gpu` falls back to `Cpu` (with a warning)
+    /// when no GPU adapter can be acquired.
+    fn select(choice: Renderer) -> Self {
+        match choice {
+            Renderer::Cpu => FrameRenderer::Cpu,
+            Renderer::Gpu => match GpuRenderer::new() {
+                Some(gpu) => {
+                    eprintln!("using gpu renderer (adapter: {})", gpu.adapter_name());
+                    FrameRenderer::Gpu(gpu)
+                }
+                None => {
+                    eprintln!("warning: no GPU adapter available; falling back to cpu renderer");
+                    FrameRenderer::Cpu
+                }
+            },
+        }
+    }
+
+    fn render(&self, tr: &dyn Transition, from: &RgbaImage, to: &RgbaImage, t: f32) -> RgbaImage {
+        match self {
+            FrameRenderer::Cpu => tr.render_cpu(from, to, t),
+            FrameRenderer::Gpu(gpu) => gpu.render(from, to, tr.shader_wgsl(), t),
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -72,6 +120,8 @@ fn main() -> Result<()> {
     let tr = by_name(&cli.transition)
         .with_context(|| format!("unknown transition '{}'; run --list", cli.transition))?;
 
+    let renderer = FrameRenderer::select(cli.renderer);
+
     let from = image::open(&from_path)
         .with_context(|| format!("opening {}", from_path.display()))?
         .to_rgba8();
@@ -94,7 +144,7 @@ fn main() -> Result<()> {
             }
             std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
             for (i, t) in timeline(n).enumerate() {
-                let frame = tr.render_cpu(&from, &to, t);
+                let frame = renderer.render(tr.as_ref(), &from, &to, t);
                 let path = dir.join(format!("frame_{i:04}.png"));
                 frame
                     .save(&path)
@@ -107,7 +157,7 @@ fn main() -> Result<()> {
             let output = cli
                 .output
                 .context("--output (or --frames + --out-dir) is required")?;
-            let frame = tr.render_cpu(&from, &to, cli.t);
+            let frame = renderer.render(tr.as_ref(), &from, &to, cli.t);
             frame
                 .save(&output)
                 .with_context(|| format!("writing {}", output.display()))?;

@@ -21,7 +21,7 @@
 
 ## 残（Issue 化）
 
-- [ ] **#1 wgpu レンダラ基盤** — native ヘッドレス + wasm、WGSL、CPU リファレンスとのパリティテスト
+- [~] **#1 wgpu レンダラ基盤** — **native 部分 完了（PR、session549）**: `additive-core` の `gpu` feature に `GpuRenderer`(wgpu29) + `crossfade.wgsl`、CLI `--renderer cpu|gpu`(default gpu, cpu フォールバック)。パリティテストが実 Intel GPU(ADL-N) で CPU リファレンスと ±2/ch 一致を確認。rgba8unorm 非srgb + 256-byte 行アラインで一致担保。**残: ブラウザ/WebGPU 側は #4**
 - [ ] **#2 No.13 玉化ディゾルブ** — orber-core git 依存で玉抽出、from が玉化して消え to が現れる
 - [ ] **#3 動画エンコード** — CLI: ffmpeg で不透明 mp4/webm（ベイク）／アルファは PNG-in-MOV
 - [ ] **#4 wasm プレビュー + WebGPU** — ブラウザで wgpu リアルタイム、書き出しは WebCodecs / MOV muxer

@@ -12,9 +12,13 @@
 //! **reference** CPU path; the production renderer is wgpu (Rust + WGSL), shared
 //! by the native CLI and the browser so both produce identical output (issue #1).
 
+#[cfg(feature = "gpu")]
+pub mod gpu;
 pub mod transition;
 pub mod transitions;
 
+#[cfg(feature = "gpu")]
+pub use gpu::GpuRenderer;
 pub use transition::{all, by_name, Transition};
 
 /// Yield the normalized time `t` for each frame of a clip.
