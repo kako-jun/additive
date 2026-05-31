@@ -1,0 +1,19 @@
+[package]
+name = "additive-13-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Pure transition-rendering core for ADDITIVE-13: (from, to, t) -> RGBA frame"
+readme = "../../README.md"
+keywords = ["image", "transition", "video", "wasm"]
+categories = ["graphics", "multimedia"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+image = { workspace = true }

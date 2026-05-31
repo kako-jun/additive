@@ -1,0 +1,27 @@
+[workspace]
+resolver = "2"
+members = ["crates/core", "crates/cli", "crates/wasm"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["kako-jun"]
+license = "MIT"
+homepage = "https://github.com/kako-jun/additive-13"
+repository = "https://github.com/kako-jun/additive-13"
+rust-version = "1.78.0"
+
+[workspace.dependencies]
+# core は png のみ継承（wasm バンドルサイズ最小化）。CLI 側で jpeg/webp を足す。
+image = { version = "0.25", default-features = false, features = ["png"] }
+clap = { version = "4.5", features = ["derive"] }
+anyhow = "1"
+wasm-bindgen = "0.2"
+console_error_panic_hook = "0.1"
+# wgpu は #1（プロダクション・レンダラ）で追加する。
+# orber-core は #2（No.13 玉化ディゾルブ）で git 依存として追加する。
+
+[profile.release]
+lto = true
+codegen-units = 1
+panic = "abort"

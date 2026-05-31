@@ -1,0 +1,5 @@
+# wasm32: getrandom 0.3 requires the wasm_js backend to be selected via cfg.
+# Not needed by the scaffold itself, but pre-armed for #2 (orber-core pulls
+# getrandom through kmeans_colors / rand), matching orber's setup.
+[target.wasm32-unknown-unknown]
+rustflags = ['--cfg', 'getrandom_backend="wasm_js"']
