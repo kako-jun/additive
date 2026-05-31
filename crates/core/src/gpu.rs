@@ -108,6 +108,12 @@ impl GpuRenderer {
         let (width, height) = from.dimensions();
         let t = t.clamp(0.0, 1.0);
 
+        // Guard empty inputs: wgpu rejects zero-sized textures, and the CPU oracle
+        // (`render_cpu`) simply yields an empty image here, so mirror that.
+        if width == 0 || height == 0 {
+            return RgbaImage::new(width, height);
+        }
+
         // sRGB-byte parity: NOT *Srgb. Sampling and rendering stay in raw bytes.
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let extent = wgpu::Extent3d {
@@ -393,6 +399,26 @@ mod tests {
         img
     }
 
+    /// Assert every channel of `a`/`b` agrees within `±2`, returning the max diff.
+    fn assert_within_tolerance(a: &RgbaImage, b: &RgbaImage, ctx: &str) -> u8 {
+        assert_eq!(a.dimensions(), b.dimensions(), "{ctx}: dimension mismatch");
+        let mut max_diff = 0u8;
+        for (x, y, ap) in a.enumerate_pixels() {
+            let bp = b.get_pixel(x, y);
+            for ch in 0..4 {
+                let d = ap.0[ch].abs_diff(bp.0[ch]);
+                max_diff = max_diff.max(d);
+                assert!(
+                    d <= 2,
+                    "{ctx}: pixel ({x},{y}) channel {ch} differs by {d} (a={:?} b={:?})",
+                    ap.0,
+                    bp.0
+                );
+            }
+        }
+        max_diff
+    }
+
     #[test]
     fn gpu_matches_cpu_within_tolerance() {
         let Some(renderer) = GpuRenderer::new() else {
@@ -404,29 +430,51 @@ mod tests {
             renderer.adapter_name()
         );
 
-        let from = gradient(37, 23, [10, 40, 80, 255]);
-        let to = gradient(37, 23, [200, 90, 20, 200]);
         let cf = Crossfade;
+        // Cover the read-back strip boundary both ways:
+        //   - 37x23 / 1x1: width not a multiple of 64, so rows ARE padded;
+        //   - 64x16: width*4 = 256 is already row-aligned, so NO padding.
+        for &(w, h) in &[(37u32, 23u32), (64, 16), (1, 1)] {
+            let from = gradient(w, h, [10, 40, 80, 255]);
+            let to = gradient(w, h, [200, 90, 20, 200]);
 
-        for &t in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
-            let cpu = cf.render_cpu(&from, &to, t);
-            let gpu = renderer.render(&from, &to, CROSSFADE_WGSL, t);
-            assert_eq!(cpu.dimensions(), gpu.dimensions());
-
-            let mut max_diff = 0u8;
-            for (c, g) in cpu.pixels().zip(gpu.pixels()) {
-                for ch in 0..4 {
-                    let d = c.0[ch].abs_diff(g.0[ch]);
-                    max_diff = max_diff.max(d);
-                    assert!(
-                        d <= 2,
-                        "t={t}: channel {ch} differs by {d} (cpu={:?} gpu={:?})",
-                        c.0,
-                        g.0
-                    );
-                }
+            for &t in &[0.0_f32, 0.25, 0.5, 0.75, 1.0] {
+                let cpu = cf.render_cpu(&from, &to, t);
+                let gpu = renderer.render(&from, &to, CROSSFADE_WGSL, t);
+                let max_diff = assert_within_tolerance(&cpu, &gpu, &format!("{w}x{h} t={t}"));
+                eprintln!("{w}x{h} t={t}: max per-channel diff = {max_diff}");
             }
-            eprintln!("t={t}: max per-channel diff = {max_diff}");
         }
+    }
+
+    /// Orientation regression: with the WGSL `v` flip in place, the GPU output at
+    /// `t = 0` must equal `from` and at `t = 1` must equal `to`, pixel-for-pixel.
+    /// A `y`-asymmetric gradient (top rows differ sharply from bottom rows) makes
+    /// an accidental vertical flip show up as a large diff rather than canceling.
+    #[test]
+    fn gpu_orientation_matches_inputs() {
+        let Some(renderer) = GpuRenderer::new() else {
+            eprintln!("SKIP gpu_orientation_matches_inputs: no GPU adapter available");
+            return;
+        };
+
+        // Strong top↔bottom asymmetry: red ramps with y, blue is the inverse ramp.
+        let (w, h) = (8u32, 13u32);
+        let mut from = RgbaImage::new(w, h);
+        for (_x, y, px) in from.enumerate_pixels_mut() {
+            let up = ((y * 255) / (h - 1)) as u8;
+            *px = Rgba([up, 0, 255 - up, 255]);
+        }
+        let mut to = RgbaImage::new(w, h);
+        for (x, _y, px) in to.enumerate_pixels_mut() {
+            let across = ((x * 255) / (w - 1)) as u8;
+            *px = Rgba([0, across, 0, 255]);
+        }
+
+        let at0 = renderer.render(&from, &to, CROSSFADE_WGSL, 0.0);
+        assert_within_tolerance(&from, &at0, "t=0 must equal `from` (no vertical flip)");
+        let at1 = renderer.render(&from, &to, CROSSFADE_WGSL, 1.0);
+        assert_within_tolerance(&to, &at1, "t=1 must equal `to` (no vertical flip)");
+        eprintln!("orientation regression: t=0==from, t=1==to confirmed");
     }
 }

@@ -9,7 +9,7 @@ authors = ["kako-jun"]
 license = "MIT"
 homepage = "https://github.com/kako-jun/additive"
 repository = "https://github.com/kako-jun/additive"
-rust-version = "1.78.0"
+rust-version = "1.87.0"
 
 [workspace.dependencies]
 # core は png のみ継承（wasm バンドルサイズ最小化）。CLI 側で jpeg/webp を足す。
@@ -22,6 +22,8 @@ console_error_panic_hook = "0.1"
 wgpu = "29"
 pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
+# Test-only: scratch dirs for the CLI end-to-end renderer-parity test.
+tempfile = "3"
 # orber-core は #2（No.13 玉化ディゾルブ）で git 依存として追加する。
 
 [profile.release]
