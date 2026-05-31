@@ -202,7 +202,8 @@ impl FrameRenderer {
                 // else uses the plain from/to/t crossfade-style pipeline.
                 if is_orb {
                     let orbs = OrbDissolve::gpu_orbs(from, orb_cfg, t);
-                    gpu.render_orbs(from, to, tr.shader_wgsl(), t, &orbs)
+                    let (front, code) = OrbDissolve::sweep_params(orb_cfg, t);
+                    gpu.render_orbs(from, to, tr.shader_wgsl(), t, &orbs, front, code)
                 } else {
                     gpu.render(from, to, tr.shader_wgsl(), t)
                 }

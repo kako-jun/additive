@@ -55,9 +55,11 @@ struct Params {
 /// `orb_dissolve.wgsl` (and `transitions::orb_dissolve::MAX_ORBS`).
 const MAX_ORBS: usize = 128;
 
-/// Params block for the orb-dissolve shader: `t`, the live orb count, and the
+/// Params block for the orb-dissolve shader: `t`, the live orb count, the
 /// UV→isotropic aspect scales (`width/short`, `height/short`) so the shader's orb
-/// distance matches the CPU oracle on non-square frames. Already 16 bytes.
+/// distance matches the CPU oracle on non-square frames, plus the directional
+/// **sweep** state — the wipe-front position (`front`, positive-axis sense) and a
+/// direction code (`dir_code`: 0 lr, 1 rl, 2 tb, 3 bt). Padded to 32 bytes.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct OrbParams {
@@ -65,6 +67,10 @@ struct OrbParams {
     orb_count: f32,
     aspect_x: f32,
     aspect_y: f32,
+    front: f32,
+    dir_code: f32,
+    _pad0: f32,
+    _pad1: f32,
 }
 
 /// One orb as the shader sees it: `pos.xy`, `radius`, `alpha` packed in the first
@@ -354,10 +360,13 @@ impl GpuRenderer {
 
     /// Render one orb-dissolve frame: same `from`/`to`/`t` contract as
     /// [`render`](Self::render), plus a slice of live orbs blended on top by the
-    /// orb-dissolve WGSL (binding 4). At most [`MAX_ORBS`] orbs are used.
+    /// orb-dissolve WGSL (binding 4) and the directional sweep state (`front` =
+    /// wipe-front position in the positive-axis sense, `dir_code` = 0 lr / 1 rl /
+    /// 2 tb / 3 bt). At most [`MAX_ORBS`] orbs are used.
     ///
     /// This is a deliberate sibling of `render` (not a generalization of it) so
     /// the No.0 crossfade pipeline — and its strict parity test — is untouched.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_orbs(
         &self,
         from: &RgbaImage,
@@ -365,6 +374,8 @@ impl GpuRenderer {
         shader_wgsl: &str,
         t: f32,
         orbs: &[GpuOrb],
+        front: f32,
+        dir_code: u32,
     ) -> RgbaImage {
         assert_eq!(
             from.dimensions(),
@@ -414,6 +425,10 @@ impl GpuRenderer {
             orb_count: orb_count as f32,
             aspect_x: width as f32 / short,
             aspect_y: height as f32 / short,
+            front,
+            dir_code: dir_code as f32,
+            _pad0: 0.0,
+            _pad1: 0.0,
         };
         let params_buffer = self
             .device
@@ -773,10 +788,10 @@ mod tests {
     }
 
     /// orb-dissolve GPU mechanism: the `render_orbs` path must run on a real
-    /// adapter and behave like a full-occlusion wipe — t=0 ≈ `from`, t=1 ≈ `to`
-    /// (orb envelope is 0 at both ends), and a mid-clip frame with orbs must
-    /// differ from a plain crossfade. No strict CPU↔GPU pixel parity is asserted
-    /// (orb drawing intentionally diverges between rasterizers).
+    /// adapter and behave like a sweep-wipe — t=0 ≈ `from`, t=1 ≈ `to` (the band
+    /// is off-frame at both ends), and a mid-clip frame's `to` region must grow
+    /// monotonically (the front sweeps one way). No strict CPU↔GPU pixel parity is
+    /// asserted (orb drawing intentionally diverges between rasterizers).
     #[test]
     fn gpu_orb_dissolve_mechanism() {
         use crate::transitions::orb_dissolve::{OrbConfig, OrbDissolve, ORB_DISSOLVE_WGSL};
@@ -790,73 +805,8 @@ mod tests {
             renderer.adapter_name()
         );
 
-        let (w, h) = (48u32, 48u32);
-        let from = gradient(w, h, [200, 40, 40, 255]);
-        let to = gradient(w, h, [20, 60, 200, 255]);
-        let cfg = OrbConfig::default();
-
-        let mean_rgb_diff = |a: &RgbaImage, b: &RgbaImage| -> f32 {
-            let mut sum = 0u64;
-            let mut n = 0u64;
-            for (ap, bp) in a.pixels().zip(b.pixels()) {
-                for c in 0..3 {
-                    sum += ap.0[c].abs_diff(bp.0[c]) as u64;
-                    n += 1;
-                }
-            }
-            sum as f32 / n as f32
-        };
-
-        let pool = OrbDissolve::orb_pool(&from);
-        assert!(!pool.is_empty(), "orb pool should be non-empty");
-
-        // t=0: no orbs (envelope 0), from fully opaque -> ≈ from.
-        let orbs0 = OrbDissolve::gpu_orbs(&from, &cfg, 0.0);
-        let f0 = renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, 0.0, &orbs0);
-        let d0_from = mean_rgb_diff(&f0, &from);
-        eprintln!("gpu t=0: mean diff to from = {d0_from:.2}");
-        assert!(d0_from < 2.0, "gpu t=0 should be ≈ from");
-
-        // t=1: from swapped out, no orbs -> ≈ to.
-        let orbs1 = OrbDissolve::gpu_orbs(&from, &cfg, 1.0);
-        let f1 = renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, 1.0, &orbs1);
-        let d1_to = mean_rgb_diff(&f1, &to);
-        eprintln!("gpu t=1: mean diff to to = {d1_to:.2}");
-        assert!(d1_to < 2.0, "gpu t=1 should be ≈ to");
-
-        // t=0.5: orbs present -> differs from a plain crossfade midpoint.
-        let orbs5 = OrbDissolve::gpu_orbs(&from, &cfg, 0.5);
-        let f5 = renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, 0.5, &orbs5);
-        let mut blend = RgbaImage::new(w, h);
-        for (o, (a, b)) in blend.pixels_mut().zip(from.pixels().zip(to.pixels())) {
-            for c in 0..3 {
-                o.0[c] = ((a.0[c] as u16 + b.0[c] as u16) / 2) as u8;
-            }
-            o.0[3] = 255;
-        }
-        let d5 = mean_rgb_diff(&f5, &blend);
-        eprintln!("gpu t=0.5: mean diff from plain crossfade = {d5:.2}");
-        assert!(d5 > 0.5, "gpu midpoint should show orbs over the crossfade");
-    }
-
-    /// **Core GPU occlusion test.** At the plateau (t=0.5) the orb curtain must
-    /// hide the base completely on the GPU path too: rendering with the base
-    /// forced to `from` vs to `to` (same orbs, sampled from `from`) must produce
-    /// near-identical frames. Proves the GPU reaches the same full occlusion as
-    /// the CPU oracle.
-    #[test]
-    fn gpu_peak_full_occlusion_base_independent() {
-        use crate::transitions::orb_dissolve::{OrbConfig, OrbDissolve, ORB_DISSOLVE_WGSL};
-
-        let Some(renderer) = GpuRenderer::new() else {
-            eprintln!("SKIP gpu_peak_full_occlusion_base_independent: no GPU adapter available");
-            return;
-        };
-        eprintln!(
-            "orb-dissolve GPU occlusion test running on adapter: {}",
-            renderer.adapter_name()
-        );
-
+        // Solid red `from`, solid blue `to`: a pixel's base color tells which side
+        // of the seam it lies on.
         let (w, h) = (64u32, 64u32);
         let from = gradient(w, h, [200, 40, 40, 255]);
         let to = gradient(w, h, [20, 60, 200, 255]);
@@ -873,16 +823,103 @@ mod tests {
             }
             sum as f32 / n as f32
         };
+        let to_fraction = |frame: &RgbaImage| -> f32 {
+            let mut to_px = 0u64;
+            let mut n = 0u64;
+            for ((p, f), g) in frame.pixels().zip(from.pixels()).zip(to.pixels()) {
+                let df: u32 = (0..3).map(|c| p.0[c].abs_diff(f.0[c]) as u32).sum();
+                let dg: u32 = (0..3).map(|c| p.0[c].abs_diff(g.0[c]) as u32).sum();
+                if dg < df {
+                    to_px += 1;
+                }
+                n += 1;
+            }
+            to_px as f32 / n as f32
+        };
 
-        // Same orbs (colors sampled from `from`); swap only the base image.
-        let orbs = OrbDissolve::gpu_orbs(&from, &cfg, 0.5);
-        let with_from_base = renderer.render_orbs(&from, &from, ORB_DISSOLVE_WGSL, 0.5, &orbs);
-        let with_to_base = renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, 0.5, &orbs);
-        let d = mean_rgb_diff(&with_from_base, &with_to_base);
-        eprintln!("gpu t=0.5 full-occlusion: mean base-swap diff = {d:.4}");
+        let pool = OrbDissolve::orb_pool(&from);
+        assert!(!pool.is_empty(), "orb pool should be non-empty");
+
+        let render_at = |t: f32| -> RgbaImage {
+            let orbs = OrbDissolve::gpu_orbs(&from, &cfg, t);
+            let (front, code) = OrbDissolve::sweep_params(&cfg, t);
+            renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, t, &orbs, front, code)
+        };
+
+        // t=0: band off the entry edge -> ≈ from.
+        let f0 = render_at(0.0);
+        let d0_from = mean_rgb_diff(&f0, &from);
+        eprintln!("gpu t=0: mean diff to from = {d0_from:.2}");
+        assert!(d0_from < 3.0, "gpu t=0 should be ≈ from");
+
+        // t=1: band off the exit edge -> ≈ to.
+        let f1 = render_at(1.0);
+        let d1_to = mean_rgb_diff(&f1, &to);
+        eprintln!("gpu t=1: mean diff to to = {d1_to:.2}");
+        assert!(d1_to < 3.0, "gpu t=1 should be ≈ to");
+
+        // Monotone sweep: to-fraction grows across t.
+        let mut prev = -1.0f32;
+        for k in 0..=10 {
+            let t = k as f32 / 10.0;
+            let frac = to_fraction(&render_at(t));
+            eprintln!("gpu t={t:.1}: to-fraction = {frac:.3}");
+            assert!(
+                frac >= prev - 0.05,
+                "gpu to-fraction must not retreat: t={t} frac={frac} prev={prev}"
+            );
+            prev = frac;
+        }
+    }
+
+    /// **Core GPU seam test.** Mid-clip, the from/to seam in the base must be
+    /// hidden under the orb band on the GPU path: along the seam line the pixels
+    /// must be orb-painted (neither pure `from` nor pure `to`). Proves the GPU
+    /// sweep hides the boundary like the CPU oracle.
+    #[test]
+    fn gpu_seam_is_covered_by_orbs() {
+        use crate::transitions::orb_dissolve::{OrbConfig, OrbDissolve, ORB_DISSOLVE_WGSL};
+
+        let Some(renderer) = GpuRenderer::new() else {
+            eprintln!("SKIP gpu_seam_is_covered_by_orbs: no GPU adapter available");
+            return;
+        };
+        eprintln!(
+            "orb-dissolve GPU seam test running on adapter: {}",
+            renderer.adapter_name()
+        );
+
+        // Solid green `from` / blue `to`: orbs carry green, the base behind the
+        // front is blue, so the seam being green ⇒ orbs hide it.
+        let (w, h) = (96u32, 96u32);
+        let mut from = RgbaImage::new(w, h);
+        for px in from.pixels_mut() {
+            *px = Rgba([0, 220, 0, 255]);
+        }
+        let mut to = RgbaImage::new(w, h);
+        for px in to.pixels_mut() {
+            *px = Rgba([0, 0, 255, 255]);
+        }
+        let cfg = OrbConfig::default();
+        let t = 0.5;
+
+        let orbs = OrbDissolve::gpu_orbs(&from, &cfg, t);
+        let (front, code) = OrbDissolve::sweep_params(&cfg, t);
+        let frame = renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, t, &orbs, front, code);
+
+        let seam_x = ((front.clamp(0.0, 1.0) * w as f32) as u32).min(w - 1);
+        let mut green = 0u32;
+        for y in 0..h {
+            let p = frame.get_pixel(seam_x, y).0;
+            if p[1] > 120 && p[1] > p[2] {
+                green += 1;
+            }
+        }
+        let frac = green as f32 / h as f32;
+        eprintln!("gpu seam_x={seam_x} (front={front:.3}): orb (green) coverage = {frac:.3}");
         assert!(
-            d < 2.0,
-            "gpu peak must fully occlude the base (mean diff {d} too high)"
+            frac > 0.7,
+            "gpu seam must be hidden under the orb band (covered {frac:.2})"
         );
     }
 }
