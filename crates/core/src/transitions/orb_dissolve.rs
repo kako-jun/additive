@@ -74,11 +74,24 @@ impl OrbDissolve {
 
     /// Compute the live orb instances at time `t` from a static `pool`.
     ///
-    /// Each orb drifts along the conveyor axis (left→right by default), wrapping
-    /// over `[-r, 1+r]` so it never pops in/out on screen, at a per-orb integer
-    /// speed multiplier, with breathing on radius. The cross-fade *envelope*
-    /// (`appear → drift → clear`) is keyed to global `t`: orbs are absent at
-    /// `t = 0`, peak mid-clip, and fully gone at `t = 1`.
+    /// Each orb is anchored at its **cluster centroid `(x, y)`** (orber's 2D
+    /// placement) and drifts along the conveyor axis (left→right by default),
+    /// wrapping over `[-r, 1+r]` so it never pops in/out on screen, at a per-orb
+    /// integer speed multiplier, with breathing on radius. Only the flow axis
+    /// (`x` for `lr`) gains the conveyor offset; the cross axis (`y`) keeps the
+    /// orb's own centroid so the field scatters in 2D instead of collapsing onto
+    /// a single horizontal band.
+    ///
+    /// Color-only k-means on a smooth gradient can give every cluster the same
+    /// spatial centroid (each color stripe spans the full cross axis, so its mean
+    /// lands at ≈0.5). To keep the field from stacking on one line in that
+    /// degenerate case, the centroid `y` is combined with a small deterministic,
+    /// index-derived cross-axis spread (same golden-ratio scheme as `phase`). For
+    /// genuinely 2D-distributed images the centroid dominates; for collapsed
+    /// gradients the spread still fans the orbs across the frame.
+    ///
+    /// The cross-fade *envelope* (`appear → drift → clear`) is keyed to global
+    /// `t`: orbs are absent at `t = 0`, peak mid-clip, and fully gone at `t = 1`.
     pub fn orb_instances(pool: &[Cluster], t: f32) -> Vec<OrbInstance> {
         let t = t.clamp(0.0, 1.0);
         // Global appearance envelope: 0 at the ends, peak at the middle. A simple
@@ -100,12 +113,20 @@ impl OrbDissolve {
                 let breath = 1.0 + 0.10 * (std::f32::consts::TAU * (t + phase)).sin();
                 let radius = (base_r * breath).max(0.0);
 
-                // One-way conveyor along x: progress wraps over [-r, 1+r].
+                // One-way conveyor along the flow axis (x): the orb's centroid x
+                // is the anchor, and progress wraps over [-r, 1+r] so it never
+                // pops in/out on screen.
                 let span = 1.0 + 2.0 * radius;
-                let raw = phase + speed * t;
+                let raw = c.centroid.x.clamp(0.0, 1.0) + phase + speed * t;
                 let prog = -radius + fract(raw) * span;
 
-                let cy = c.centroid.y.clamp(0.0, 1.0);
+                // Cross axis (y): keep the orb's own centroid, plus a small
+                // deterministic, index-derived spread so a degenerate gradient
+                // (every cluster centroid ≈ 0.5) still fans out in 2D rather than
+                // collapsing onto one horizontal band. Golden-ratio low-discrepancy
+                // sequence centered on 0 gives an even, repeat-free cross spread.
+                let scatter = fract(0.37 + (i as f32) * 0.381_966) - 0.5; // [-0.5, 0.5)
+                let cy = (c.centroid.y + 0.7 * scatter).clamp(0.0, 1.0);
 
                 let [r, g, b] = c.color;
                 OrbInstance {
