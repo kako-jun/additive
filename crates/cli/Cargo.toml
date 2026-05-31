@@ -1,5 +1,5 @@
 [package]
-name = "additive-13"
+name = "additive"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -8,18 +8,18 @@ homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 description = "Render transitions between two images as video-ready frame sequences (ADDITIVE-13)"
-documentation = "https://docs.rs/additive-13"
+documentation = "https://docs.rs/additive"
 readme = "../../README.md"
 keywords = ["image", "video", "transition", "cli"]
 categories = ["command-line-utilities", "graphics", "multimedia"]
 exclude = [".github/", "target/"]
 
 [[bin]]
-name = "additive-13"
+name = "additive"
 path = "src/main.rs"
 
 [dependencies]
-additive-13-core = { path = "../core", version = "0.1.0" }
+additive-core = { path = "../core", version = "0.1.0" }
 # CLI decodes arbitrary inputs, so add jpeg/webp on top of the workspace png.
 image = { workspace = true, features = ["jpeg"] }
 clap = { workspace = true }

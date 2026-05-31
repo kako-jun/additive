@@ -6,14 +6,14 @@
 
 use std::path::PathBuf;
 
-use additive_13_core::{all, by_name, timeline};
+use additive_core::{all, by_name, timeline};
 use anyhow::{bail, Context, Result};
 use clap::Parser;
 use image::imageops::FilterType;
 
 #[derive(Parser)]
 #[command(
-    name = "additive-13",
+    name = "additive",
     version,
     about = "Render transitions between two images (ADDITIVE-13)"
 )]

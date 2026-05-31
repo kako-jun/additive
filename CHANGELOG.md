@@ -7,8 +7,8 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 ## [Unreleased]
 
 ### Added
-- Initial scaffold (session549). Cargo workspace mirroring orber: `additive-13-core`
-  (pure transition core, wasm-buildable), `additive-13` (CLI), `additive-13-wasm`
+- Initial scaffold (session549). Cargo workspace mirroring orber: `additive-core`
+  (pure transition core, wasm-buildable), `additive` (CLI), `additive-wasm`
   (browser bindings).
 - `Transition` contract — `(from, to, t) -> RGBA frame` — with an E-number style
   designation per additive.

@@ -12,7 +12,7 @@ cargo test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --check
 # wasm ターゲットも通すこと（core / wasm が wasm32 でビルド可能であること）
-cargo build --target wasm32-unknown-unknown -p additive-13-core -p additive-13-wasm
+cargo build --target wasm32-unknown-unknown -p additive-core -p additive-wasm
 ```
 
 ## ドキュメント
@@ -32,19 +32,19 @@ orber と同じ Cargo workspace 構成。純粋描画コアだけを GUI / WASM 
 I/O と子プロセスは CLI 側に隔離する。
 
 ```
-additive-13/
+additive/
 ├── Cargo.toml              # [workspace] members = ["crates/core", "crates/cli", "crates/wasm"]
 ├── .cargo/config.toml      # wasm32 用 getrandom_backend cfg（#2 の orber-core 依存に備える）
 └── crates/
-    ├── core/               # additive-13-core: 純粋トランジションコア（wasm ビルド可・I/O 無し）
+    ├── core/               # additive-core: 純粋トランジションコア（wasm ビルド可・I/O 無し）
     │   └── src/
     │       ├── lib.rs              # timeline() 等
     │       ├── transition.rs       # trait Transition + by_name / all レジストリ
     │       └── transitions/
     │           ├── mod.rs
     │           └── crossfade.rs    # No.0 リファレンス（CPU、パリティオラクル）
-    ├── cli/                # additive-13: CLI バイナリ（image::open / 連番PNG / 将来 ffmpeg）
-    └── wasm/               # additive-13-wasm: ブラウザ向け wasm-bindgen ラッパー
+    ├── cli/                # additive: CLI バイナリ（image::open / 連番PNG / 将来 ffmpeg）
+    └── wasm/               # additive-wasm: ブラウザ向け wasm-bindgen ラッパー
 ```
 
 ## 主要な設計判断
@@ -56,7 +56,7 @@ additive-13/
   ②を満たせない（別レンダラ＝別ピクセル）。wgpu だけが両立する。詳細は `docs/overview.md`
 - **raw WebGL / raw WebGPU-in-JS は採らない**。シェーダが Rust の外に出ると orber と同じ
   2コードベース分裂が再発する。wgpu はシェーダ(WGSL)を Rust の内側に置けるのが本質
-- **`additive-13-core` の CPU レンダラはリファレンス（パリティオラクル）**。プロダクション
+- **`additive-core` の CPU レンダラはリファレンス（パリティオラクル）**。プロダクション
   ではない。wgpu 出力をこれと突き合わせて検証する。web GUI には wgpu 着地まで CPU で
   暫定プレビューを出させる
 - **トランジション契約は `(from, to, t) -> RgbaImage`**。`from` と `to` は同寸法前提

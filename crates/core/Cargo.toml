@@ -1,5 +1,5 @@
 [package]
-name = "additive-13-core"
+name = "additive-core"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true

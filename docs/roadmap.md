@@ -5,7 +5,7 @@
 - 命名: **ADDITIVE-13**（additive＝添加物＋13号 designation）。フラグ機 No.13＝玉化ディゾルブ
 - レンダラ: **wgpu（Rust + WGSL）1本**で native(CLI) + browser(WebGPU) を賄い、出力一致。
   2要件（①リアルタイムプレビュー ②CLI=web 同一）が wgpu 以外を全て脱落させた
-- `additive-13-core` の CPU 経路はリファレンス／パリティオラクル（プロダクションではない）
+- `additive-core` の CPU 経路はリファレンス／パリティオラクル（プロダクションではない）
 - No.13 は `orber-core` を git 依存で借りて玉を出す。orber に `--transition` は生やさない
 - アルファ出力は orber の PNG-in-MOV muxer（`movMuxer.ts`）流用。ffmpeg.wasm vp9-alpha は踏まない
 
@@ -26,7 +26,7 @@
 - [ ] **#3 動画エンコード** — CLI: ffmpeg で不透明 mp4/webm（ベイク）／アルファは PNG-in-MOV
 - [ ] **#4 wasm プレビュー + WebGPU** — ブラウザで wgpu リアルタイム、書き出しは WebCodecs / MOV muxer
 - [ ] **#5 Web GUI** — Astro + Solid + Tailwind、orber 流、CLI と同一出力。DESIGN.md を実装
-- [ ] **#6 サブドメイン公開** — `additive-13.llll-ll.com`（CF Pages）
+- [ ] **#6 サブドメイン公開** — `additive.llll-ll.com`（CF Pages）
 - [ ] **#7 name-name 配線** — 透過 webm/mov を事前レンダして場面転換に流す
 - [ ] **#8 添加物拡充（umbrella）** — No.14+ にじみ / 光漏れ / グリッチ …
 

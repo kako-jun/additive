@@ -34,7 +34,7 @@ compiled to native (CLI) and to wasm/WebGPU (browser). No separate WebGL shader,
 no separate CPU path diverging from the GPU one. (See `docs/overview.md` for why
 raw WebGL or a CPU-only wasm core each fail one half of the constraint.)
 
-The reference CPU renderer in `additive-13-core` is the parity oracle the wgpu
+The reference CPU renderer in `additive-core` is the parity oracle the wgpu
 path is checked against — not the production path.
 
 ## Usage
@@ -43,13 +43,13 @@ The product output is **video** — a transition is something you play, not a st
 
 ```bash
 # A frame sequence over the whole transition (feeds the video encoder)
-additive-13 --from a.jpg --to b.jpg --frames 48 --out-dir frames/
+additive --from a.jpg --to b.jpg --frames 48 --out-dir frames/
 
 # List available additives
-additive-13 --list
+additive --list
 
 # Debug peek: render one frame at a given t (for eyeballing / parity tests, not a product feature)
-additive-13 --from a.jpg --to b.jpg --output peek.png --t 0.5
+additive --from a.jpg --to b.jpg --output peek.png --t 0.5
 ```
 
 Video muxing (opaque `mp4` and transparent `mov` for overlay compositing) lands
@@ -60,9 +60,9 @@ is strictly two-input transitions.
 ## Layout
 
 ```
-crates/core   additive-13-core — the Transition contract + reference renderer (wasm-buildable, no I/O)
-crates/cli    additive-13      — the command-line tool (image I/O, encoding)
-crates/wasm   additive-13-wasm — browser bindings
+crates/core   additive-core — the Transition contract + reference renderer (wasm-buildable, no I/O)
+crates/cli    additive      — the command-line tool (image I/O, encoding)
+crates/wasm   additive-wasm — browser bindings
 web/          Astro + Solid web app (planned)
 ```
 

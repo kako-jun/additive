@@ -3,27 +3,27 @@
 version = 3
 
 [[package]]
-name = "additive-13"
+name = "additive"
 version = "0.1.0"
 dependencies = [
- "additive-13-core",
+ "additive-core",
  "anyhow",
  "clap",
  "image",
 ]
 
 [[package]]
-name = "additive-13-core"
+name = "additive-core"
 version = "0.1.0"
 dependencies = [
  "image",
 ]
 
 [[package]]
-name = "additive-13-wasm"
+name = "additive-wasm"
 version = "0.1.0"
 dependencies = [
- "additive-13-core",
+ "additive-core",
  "console_error_panic_hook",
  "image",
  "wasm-bindgen",

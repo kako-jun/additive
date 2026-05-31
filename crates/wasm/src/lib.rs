@@ -1,10 +1,10 @@
-//! Browser bindings for additive-13-core.
+//! Browser bindings for additive-core.
 //!
 //! For now this exposes the **CPU reference** renderer so the web GUI has a
 //! working preview from day one. The fast path is wgpu / WebGPU (#1, #4); when it
 //! lands, the same WGSL renders here and in the CLI, for identical output.
 
-use additive_13_core::{all, by_name};
+use additive_core::{all, by_name};
 use image::RgbaImage;
 use wasm_bindgen::prelude::*;
 

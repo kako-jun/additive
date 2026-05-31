@@ -1,5 +1,5 @@
 [package]
-name = "additive-13-wasm"
+name = "additive-wasm"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
@@ -7,7 +7,7 @@ license.workspace = true
 homepage.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "WASM bindings for additive-13-core (browser transition preview)"
+description = "WASM bindings for additive-core (browser transition preview)"
 keywords = ["wasm", "image", "transition"]
 categories = ["wasm", "graphics"]
 
@@ -15,7 +15,7 @@ categories = ["wasm", "graphics"]
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-additive-13-core = { path = "../core", version = "0.1.0" }
+additive-core = { path = "../core", version = "0.1.0" }
 image = { workspace = true }
 wasm-bindgen = { workspace = true }
 console_error_panic_hook = { workspace = true }

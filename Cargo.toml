@@ -7,8 +7,8 @@ version = "0.1.0"
 edition = "2021"
 authors = ["kako-jun"]
 license = "MIT"
-homepage = "https://github.com/kako-jun/additive-13"
-repository = "https://github.com/kako-jun/additive-13"
+homepage = "https://github.com/kako-jun/additive"
+repository = "https://github.com/kako-jun/additive"
 rust-version = "1.78.0"
 
 [workspace.dependencies]

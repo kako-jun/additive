@@ -49,7 +49,7 @@ implementations).
 > outside Rust, recreating the same two-codebase split. The point of wgpu is that
 > the shader lives *inside* the Rust crate and serves both targets.
 
-The CPU renderer in `additive-13-core` exists as the **reference / parity oracle**
+The CPU renderer in `additive-core` exists as the **reference / parity oracle**
 the wgpu path is verified against, and to give the web GUI a working (if slower)
 preview before the wgpu path lands.
 
