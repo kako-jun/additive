@@ -64,12 +64,23 @@ default, CPU fallback on adapter failure). The browser / WebGPU half lands in #4
 ## Output modes
 
 - **Baked** — composite `from → to` internally and emit an opaque `mp4` / `webm`.
-  Simplest; this is what validates the look first.
+  Simplest; this is what validates the look first. **Implemented (#3):** the CLI
+  renders the whole transition as a frame sequence (`--duration-ms`, `--fps`) and
+  shells out to `ffmpeg` to mux it — `.mp4` → H.264/`yuv420p`, `.webm` →
+  VP9/`yuv420p`. I/O and the child process live in `crates/cli/src/video.rs` so
+  `additive-core` stays a pure `(from, to, t) -> RGBA frame` library; the output
+  kind is inferred from `--output`'s extension. ffmpeg missing from `PATH` is a
+  clear error with an install hint.
 - **Alpha overlay** — emit only the dissolving layer with an alpha channel, so
   name-name (or any compositor) can play it over live content. The browser path
   reuses orber's hard-won approach: PNG frames muxed into a QuickTime `.mov`
   container (RGBA 32-bit lossless, NLE-compatible) rather than fighting
-  ffmpeg.wasm's vp9-alpha — see orber's `web/src/lib/movMuxer.ts`.
+  ffmpeg.wasm's vp9-alpha — see orber's `web/src/lib/movMuxer.ts`. **Follow-up
+  (#3):** this needs a straight-alpha *overlay* render path in core — skip the
+  `to` background and emit `from`+effect on transparent — in **both** the WGSL
+  shader and the CPU oracle, a core change with its own parity story. The CLI
+  already reserves `--alpha` / `.mov` and rejects them with a clear
+  not-yet-implemented error rather than silently baking opaque.
 
 ## Relationship to orber
 

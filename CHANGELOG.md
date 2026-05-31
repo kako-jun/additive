@@ -19,8 +19,19 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   oracle within ±2/channel on a real adapter. Textures are `Rgba8Unorm` (never
   srgb) and readback handles 256-byte row padding, so the GPU `mix` equals the CPU
   integer lerp. wasm builds keep the feature off (browser/WebGPU wiring is #4).
-- CLI: `--from / --to / --transition / --output / --t`, `--frames / --out-dir`,
-  `--list`.
+- **Baked video output via ffmpeg (#3)**: `--output out.mp4` / `out.webm` renders
+  the whole transition as a frame sequence and muxes it with `ffmpeg` —
+  `.mp4` → H.264 (`yuv420p`, `+faststart`), `.webm` → VP9 (`yuv420p`). New
+  `--duration-ms` (default 2500) and `--fps` (default 30) control clip length; the
+  output kind is inferred from `--output`'s extension (`.png` stays the single
+  debug frame). I/O and the child process live in `crates/cli/src/video.rs` so
+  `additive-core` stays pure. ffmpeg missing from `PATH` gives a clear error with
+  an install hint; a non-zero ffmpeg exit surfaces its stderr. Alpha overlay
+  output (`--alpha` / `.mov`) is reserved but rejected with a not-yet-implemented
+  error — a #3 follow-up needing a straight-alpha overlay render path in core
+  (WGSL + CPU oracle).
+- CLI: `--from / --to / --transition / --output / --t`, `--duration-ms / --fps`,
+  `--frames / --out-dir`, `--list`.
 - wasm bindings exposing the CPU reference renderer for an immediate (pre-wgpu)
   browser preview.
 - Documentation: README (EN), `docs/overview.md` (EN), `docs/roadmap.md` (JP),
