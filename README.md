@@ -42,7 +42,15 @@ path is checked against — not the production path.
 The product output is **video** — a transition is something you play, not a still.
 
 ```bash
-# A frame sequence over the whole transition (feeds the video encoder)
+# Baked video — the product output. The extension picks the codec:
+#   .mp4  -> H.264 (libx264, yuv420p)   .webm -> VP9 (libvpx-vp9, yuv420p)
+additive --from a.jpg --to b.jpg --transition orb-dissolve --output out.mp4
+additive --from a.jpg --to b.jpg --transition crossfade   --output out.webm
+
+# Video length / frame rate (defaults: 2500ms, 30fps)
+additive --from a.jpg --to b.jpg --output out.mp4 --duration-ms 2000 --fps 30
+
+# A raw frame sequence over the whole transition (no encoder)
 additive --from a.jpg --to b.jpg --frames 48 --out-dir frames/
 
 # List available additives
@@ -52,10 +60,11 @@ additive --list
 additive --from a.jpg --to b.jpg --output peek.png --t 0.5
 ```
 
-Video muxing (opaque `mp4` and transparent `mov` for overlay compositing) lands
-with the wgpu renderer; see the roadmap. Single-image *stylizing* is intentionally
-out of scope — that is [orber](https://github.com/kako-jun/orber)'s job. ADDITIVE-13
-is strictly two-input transitions.
+Baked video needs **ffmpeg** on your `PATH` (the CLI shells out to it). Opaque
+`mp4` / `webm` work today; transparent `mov` for overlay compositing (`--alpha`)
+is a follow-up — see the roadmap. Single-image *stylizing* is intentionally out of
+scope — that is [orber](https://github.com/kako-jun/orber)'s job. ADDITIVE-13 is
+strictly two-input transitions.
 
 ## Layout
 

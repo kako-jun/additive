@@ -25,6 +25,8 @@ additive-core = { path = "../core", version = "0.1.0", features = ["gpu"] }
 image = { workspace = true, features = ["jpeg"] }
 clap = { workspace = true }
 anyhow = { workspace = true }
+# Video output (#3): scratch dir for the frame sequence ffmpeg muxes.
+tempfile = { workspace = true }
 
 [dev-dependencies]
 # End-to-end renderer-parity test: generate small PNGs and run the built binary.

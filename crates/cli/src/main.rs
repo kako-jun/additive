@@ -1,16 +1,21 @@
 //! ADDITIVE-13 CLI.
 //!
-//! Renders a transition between two images. For now it emits PNG stills / frame
-//! sequences via the reference CPU renderer; video muxing (mp4 / alpha mov) and
-//! the wgpu fast path land in issues #1 and #3.
+//! Renders a transition between two images. It emits PNG stills / frame sequences
+//! via the selected renderer, and bakes opaque `mp4` / `webm` video via ffmpeg
+//! (#3). The output kind is inferred from `--output`'s extension: `.png` is a
+//! single debug frame, `.mp4` / `.webm` are baked clips.
 
-use std::path::PathBuf;
+mod video;
+
+use std::path::{Path, PathBuf};
 
 use additive_core::{all, by_name, timeline, GpuRenderer, OrbDissolve, Transition};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use image::imageops::FilterType;
 use image::RgbaImage;
+
+use video::{calc_frame_count, render_video, VideoCodec, DEFAULT_DURATION_MS, DEFAULT_FPS};
 
 /// Which renderer backend to drive.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -40,13 +45,27 @@ struct Cli {
     #[arg(long, default_value = "crossfade")]
     transition: String,
 
-    /// Output PNG path for a single frame.
+    /// Output path. The extension picks the mode: `.png` = single debug frame,
+    /// `.mp4` = baked H.264, `.webm` = baked VP9.
     #[arg(long, value_name = "PATH")]
     output: Option<PathBuf>,
 
-    /// Normalized time of the single output frame, 0.0..=1.0.
+    /// Normalized time of the single `.png` output frame, 0.0..=1.0.
     #[arg(long, default_value_t = 0.5)]
     t: f32,
+
+    /// Clip length in milliseconds for video output (`.mp4` / `.webm`).
+    #[arg(long, default_value_t = DEFAULT_DURATION_MS)]
+    duration_ms: u64,
+
+    /// Frame rate for video output (`.mp4` / `.webm`).
+    #[arg(long, default_value_t = DEFAULT_FPS)]
+    fps: u32,
+
+    /// Request a transparent overlay clip (alpha). Not yet implemented; see
+    /// roadmap #3 follow-up.
+    #[arg(long)]
+    alpha: bool,
 
     /// Instead of one frame, write this many PNG frames over [0,1] into --out-dir.
     #[arg(long)]
@@ -147,12 +166,12 @@ fn main() -> Result<()> {
         image::imageops::resize(&to, w, h, FilterType::Lanczos3)
     };
 
-    match (cli.frames, cli.out_dir) {
+    match (cli.frames, cli.out_dir.as_deref()) {
         (Some(n), Some(dir)) => {
             if n < 2 {
                 bail!("--frames must be >= 2");
             }
-            std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+            std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             for (i, t) in timeline(n).enumerate() {
                 let frame = renderer.render(tr.as_ref(), &from, &to, t);
                 let path = dir.join(format!("frame_{i:04}.png"));
@@ -166,14 +185,78 @@ fn main() -> Result<()> {
         (None, _) => {
             let output = cli
                 .output
+                .as_deref()
                 .context("--output (or --frames + --out-dir) is required")?;
-            let frame = renderer.render(tr.as_ref(), &from, &to, cli.t);
-            frame
-                .save(&output)
-                .with_context(|| format!("writing {}", output.display()))?;
-            eprintln!("wrote {} at t={}", output.display(), cli.t);
+            let opts = OutputOpts {
+                t: cli.t,
+                duration_ms: cli.duration_ms,
+                fps: cli.fps,
+                alpha: cli.alpha,
+            };
+            run_output(&opts, tr.as_ref(), &renderer, &from, &to, output)?;
         }
     }
 
+    Ok(())
+}
+
+/// Knobs for a single `--output`, lifted off [`Cli`] so dispatch doesn't borrow
+/// the whole (partially-moved) parsed struct.
+struct OutputOpts {
+    t: f32,
+    duration_ms: u64,
+    fps: u32,
+    alpha: bool,
+}
+
+/// Dispatch a single `--output` by its extension: a `.png` debug frame, a baked
+/// `.mp4` / `.webm` clip, or (eventually) an alpha `.mov`.
+fn run_output(
+    opts: &OutputOpts,
+    tr: &dyn Transition,
+    renderer: &FrameRenderer,
+    from: &RgbaImage,
+    to: &RgbaImage,
+    output: &Path,
+) -> Result<()> {
+    let ext = output
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.to_ascii_lowercase());
+
+    // Alpha overlay (.mov / --alpha) is a deliberate follow-up: it needs a
+    // straight-alpha overlay render path (skip the `to` background, emit
+    // from+effect on transparent) in WGSL *and* the CPU oracle, which is a core
+    // change with its own parity story. Baked mp4/webm ships first (#3); alpha is
+    // tracked as a #3 follow-up. Fail loudly rather than silently bake opaque.
+    if opts.alpha || ext.as_deref() == Some("mov") {
+        bail!(
+            "alpha overlay output (--alpha / .mov) is not implemented yet; it needs a \
+             straight-alpha overlay render path in additive-core (WGSL + CPU oracle) and \
+             is tracked as a #3 follow-up. Use .mp4 or .webm for a baked (opaque) clip."
+        );
+    }
+
+    if let Some(codec) = VideoCodec::from_path(output) {
+        let total = calc_frame_count(opts.duration_ms, opts.fps);
+        render_video(output, codec, total, opts.fps, |_, t| {
+            renderer.render(tr, from, to, t)
+        })
+        .with_context(|| format!("encoding {}", output.display()))?;
+        eprintln!(
+            "wrote {} ({total} frames @ {}fps, {}ms)",
+            output.display(),
+            opts.fps,
+            opts.duration_ms,
+        );
+        return Ok(());
+    }
+
+    // Default / `.png`: single debug frame at --t.
+    let frame = renderer.render(tr, from, to, opts.t);
+    frame
+        .save(output)
+        .with_context(|| format!("writing {}", output.display()))?;
+    eprintln!("wrote {} at t={}", output.display(), opts.t);
     Ok(())
 }
