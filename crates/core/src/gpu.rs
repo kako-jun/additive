@@ -51,6 +51,36 @@ struct Params {
     _pad: [f32; 3],
 }
 
+/// Maximum orbs the orb-dissolve shader iterates. Must match `MAX_ORBS` in
+/// `orb_dissolve.wgsl` (and `transitions::orb_dissolve::MAX_ORBS`).
+const MAX_ORBS: usize = 16;
+
+/// Params block for the orb-dissolve shader: `t` plus the live orb count, padded
+/// to 16 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct OrbParams {
+    t: f32,
+    orb_count: f32,
+    _pad: [f32; 2],
+}
+
+/// One orb as the shader sees it: `pos.xy`, `radius`, `alpha` packed in the first
+/// vec4; straight sRGB color in the second. Matches `struct Orb` in the WGSL.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct GpuOrb {
+    pub pos_radius_alpha: [f32; 4],
+    pub color: [f32; 4],
+}
+
+/// The orb-array uniform: a fixed-size `[GpuOrb; MAX_ORBS]` (unused tail zeroed).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct OrbArray {
+    orbs: [GpuOrb; MAX_ORBS],
+}
+
 /// Headless wgpu renderer. Holds a device/queue; render any transition's WGSL
 /// against a `from`/`to` pair via [`GpuRenderer::render`].
 pub struct GpuRenderer {
@@ -320,6 +350,249 @@ impl GpuRenderer {
             .expect("read-back buffer matches image dimensions")
     }
 
+    /// Render one orb-dissolve frame: same `from`/`to`/`t` contract as
+    /// [`render`](Self::render), plus a slice of live orbs blended on top by the
+    /// orb-dissolve WGSL (binding 4). At most [`MAX_ORBS`] orbs are used.
+    ///
+    /// This is a deliberate sibling of `render` (not a generalization of it) so
+    /// the No.0 crossfade pipeline — and its strict parity test — is untouched.
+    pub fn render_orbs(
+        &self,
+        from: &RgbaImage,
+        to: &RgbaImage,
+        shader_wgsl: &str,
+        t: f32,
+        orbs: &[GpuOrb],
+    ) -> RgbaImage {
+        assert_eq!(
+            from.dimensions(),
+            to.dimensions(),
+            "from and to must share dimensions"
+        );
+        let (width, height) = from.dimensions();
+        let t = t.clamp(0.0, 1.0);
+        if width == 0 || height == 0 {
+            return RgbaImage::new(width, height);
+        }
+
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let extent = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+
+        let from_view = self.upload_texture(from, format, "additive-from");
+        let to_view = self.upload_texture(to, format, "additive-to");
+
+        let target = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("additive-orb-target"),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("additive-orb-sampler"),
+            ..Default::default()
+        });
+
+        let orb_count = orbs.len().min(MAX_ORBS);
+        let params = OrbParams {
+            t,
+            orb_count: orb_count as f32,
+            _pad: [0.0; 2],
+        };
+        let params_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("additive-orb-params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let mut orb_array = OrbArray {
+            orbs: [GpuOrb {
+                pos_radius_alpha: [0.0; 4],
+                color: [0.0; 4],
+            }; MAX_ORBS],
+        };
+        orb_array.orbs[..orb_count].copy_from_slice(&orbs[..orb_count]);
+        let orb_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("additive-orb-array"),
+                contents: bytemuck::bytes_of(&orb_array),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("additive-orb-bgl"),
+                    entries: &[
+                        texture_entry(0),
+                        texture_entry(1),
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                            count: None,
+                        },
+                        uniform_entry(3),
+                        uniform_entry(4),
+                    ],
+                });
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("additive-orb-bg"),
+            layout: &bind_group_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&from_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&to_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: params_buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: orb_buffer.as_entire_binding(),
+                },
+            ],
+        });
+
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("additive-orb-shader"),
+                source: wgpu::ShaderSource::Wgsl(shader_wgsl.into()),
+            });
+
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("additive-orb-pl"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
+            });
+
+        let pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("additive-orb-pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+
+        let unpadded_bytes_per_row = width * BYTES_PER_PIXEL;
+        let padded_bytes_per_row = align_up(unpadded_bytes_per_row, ROW_ALIGNMENT);
+        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("additive-orb-readback"),
+            size: (padded_bytes_per_row * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("additive-orb-encoder"),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("additive-orb-pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &output_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            extent,
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = output_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll failed");
+
+        let mapped = slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
+        for row in 0..height {
+            let start = (row * padded_bytes_per_row) as usize;
+            let end = start + unpadded_bytes_per_row as usize;
+            pixels.extend_from_slice(&mapped[start..end]);
+        }
+        drop(mapped);
+        output_buffer.unmap();
+
+        RgbaImage::from_raw(width, height, pixels)
+            .expect("read-back buffer matches image dimensions")
+    }
+
     /// Upload an `RgbaImage` into a sampled texture and return its view.
     fn upload_texture(
         &self,
@@ -359,6 +632,20 @@ impl GpuRenderer {
             extent,
         );
         texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+}
+
+/// A fragment-visible uniform-buffer bind-group-layout entry.
+fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Buffer {
+            ty: wgpu::BufferBindingType::Uniform,
+            has_dynamic_offset: false,
+            min_binding_size: None,
+        },
+        count: None,
     }
 }
 
@@ -476,5 +763,71 @@ mod tests {
         let at1 = renderer.render(&from, &to, CROSSFADE_WGSL, 1.0);
         assert_within_tolerance(&to, &at1, "t=1 must equal `to` (no vertical flip)");
         eprintln!("orientation regression: t=0==from, t=1==to confirmed");
+    }
+
+    /// orb-dissolve GPU mechanism: the `render_orbs` path must run on a real
+    /// adapter and behave like a dissolve — t=0 ≈ `from`, t=1 ≈ `to` (orb
+    /// envelope is 0 at both ends), and a mid-clip frame with orbs must differ
+    /// from a plain crossfade. No strict CPU↔GPU pixel parity is asserted (orb
+    /// drawing intentionally diverges between rasterizers).
+    #[test]
+    fn gpu_orb_dissolve_mechanism() {
+        use crate::transitions::orb_dissolve::{OrbDissolve, ORB_DISSOLVE_WGSL};
+
+        let Some(renderer) = GpuRenderer::new() else {
+            eprintln!("SKIP gpu_orb_dissolve_mechanism: no GPU adapter available");
+            return;
+        };
+        eprintln!(
+            "orb-dissolve GPU test running on adapter: {}",
+            renderer.adapter_name()
+        );
+
+        let (w, h) = (48u32, 48u32);
+        let from = gradient(w, h, [200, 40, 40, 255]);
+        let to = gradient(w, h, [20, 60, 200, 255]);
+
+        let mean_rgb_diff = |a: &RgbaImage, b: &RgbaImage| -> f32 {
+            let mut sum = 0u64;
+            let mut n = 0u64;
+            for (ap, bp) in a.pixels().zip(b.pixels()) {
+                for c in 0..3 {
+                    sum += ap.0[c].abs_diff(bp.0[c]) as u64;
+                    n += 1;
+                }
+            }
+            sum as f32 / n as f32
+        };
+
+        let pool = OrbDissolve::orb_pool(&from);
+        assert!(!pool.is_empty(), "orb pool should be non-empty");
+
+        // t=0: no orbs (envelope 0), from fully opaque -> ≈ from.
+        let orbs0 = OrbDissolve::gpu_orbs(&pool, 0.0);
+        let f0 = renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, 0.0, &orbs0);
+        let d0_from = mean_rgb_diff(&f0, &from);
+        eprintln!("gpu t=0: mean diff to from = {d0_from:.2}");
+        assert!(d0_from < 2.0, "gpu t=0 should be ≈ from");
+
+        // t=1: from faded out, no orbs -> ≈ to.
+        let orbs1 = OrbDissolve::gpu_orbs(&pool, 1.0);
+        let f1 = renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, 1.0, &orbs1);
+        let d1_to = mean_rgb_diff(&f1, &to);
+        eprintln!("gpu t=1: mean diff to to = {d1_to:.2}");
+        assert!(d1_to < 2.0, "gpu t=1 should be ≈ to");
+
+        // t=0.5: orbs present -> differs from a plain crossfade midpoint.
+        let orbs5 = OrbDissolve::gpu_orbs(&pool, 0.5);
+        let f5 = renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, 0.5, &orbs5);
+        let mut blend = RgbaImage::new(w, h);
+        for (o, (a, b)) in blend.pixels_mut().zip(from.pixels().zip(to.pixels())) {
+            for c in 0..3 {
+                o.0[c] = ((a.0[c] as u16 + b.0[c] as u16) / 2) as u8;
+            }
+            o.0[3] = 255;
+        }
+        let d5 = mean_rgb_diff(&f5, &blend);
+        eprintln!("gpu t=0.5: mean diff from plain crossfade = {d5:.2}");
+        assert!(d5 > 0.5, "gpu midpoint should show orbs over the crossfade");
     }
 }

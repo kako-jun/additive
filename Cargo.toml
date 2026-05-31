@@ -24,7 +24,9 @@ pollster = "0.4"
 bytemuck = { version = "1", features = ["derive"] }
 # Test-only: scratch dirs for the CLI end-to-end renderer-parity test.
 tempfile = "3"
-# orber-core は #2（No.13 玉化ディゾルブ）で git 依存として追加する。
+# orber-core: No.13 玉化ディゾルブ（#2）の玉エンジン供給元。crates.io 未公開なので
+# git 依存で引く。additive-core の gpu feature 内に閉じ込め、wasm(gpu 無し)を汚さない。
+orber-core = { git = "https://github.com/kako-jun/orber" }
 
 [profile.release]
 lto = true

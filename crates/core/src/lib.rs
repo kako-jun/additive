@@ -18,8 +18,11 @@ pub mod transition;
 pub mod transitions;
 
 #[cfg(feature = "gpu")]
-pub use gpu::GpuRenderer;
+pub use gpu::{GpuOrb, GpuRenderer};
 pub use transition::{all, by_name, Transition};
+
+#[cfg(feature = "gpu")]
+pub use transitions::orb_dissolve::OrbDissolve;
 
 /// Yield the normalized time `t` for each frame of a clip.
 ///
