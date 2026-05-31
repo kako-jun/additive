@@ -7,9 +7,12 @@ another. Each additive is a pure function of normalized time `t`:
 (from image, to image, t in 0..1)  ->  RGBA frame
 ```
 
-The flagship, **No.13 — orb-dissolve**, breaks the *from* image into slowly
-drifting orbs that fade away, revealing the *to* image beneath. (The name nods to
-パトレイバー's 廃棄物13号 and to the way food additives are catalogued by number.)
+The flagship, **No.13 — orb-dissolve**, sweeps a band of *from*-colored orbs
+across the frame in one direction (right→left by default): everything the band has
+already passed is *to*, everything ahead is still *from*, and the from→to seam is
+always hidden inside the moving band of orbs (`--count` / `--speed` / `--direction`
+/ `--orb-size` tune the sweep). (The name nods to パトレイバー's 廃棄物13号 and to the
+way food additives are catalogued by number.)
 
 > **Status:** prototype scaffold. The reference CPU renderer works end-to-end
 > (`No.0 — crossfade`); the production wgpu renderer and `No.13 — orb-dissolve`
@@ -58,6 +61,10 @@ additive --list
 
 # Debug peek: render one frame at a given t (for eyeballing / parity tests, not a product feature)
 additive --from a.jpg --to b.jpg --output peek.png --t 0.5
+
+# No.13 orb-dissolve curtain knobs (ignored by other transitions)
+additive --from a.jpg --to b.jpg --transition orb-dissolve --output out.mp4 \
+  --count 100 --orb-size 1.5 --direction tb --speed 1.5
 ```
 
 Baked video needs **ffmpeg** on your `PATH` (the CLI shells out to it). Video

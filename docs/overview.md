@@ -17,7 +17,7 @@ Each additive has an E-number style designation and a stable kebab-case name:
 | Designation | Name           | Status      | Notes                                                        |
 | ----------- | -------------- | ----------- | ------------------------------------------------------------ |
 | No.0        | `crossfade`    | implemented | Linear cross-dissolve. Reference baseline + parity oracle.   |
-| No.13       | `orb-dissolve` | implemented | `from` shatters into drifting orbs (via orber-core) and clears to reveal `to`. Flagship. |
+| No.13       | `orb-dissolve` | implemented | A band of color orbs (palette via orber-core) flows on a one-way conveyor and **sweeps across** the frame: ahead of the band the base is still `from`, behind it `to`, and the `from→to` seam rides hidden inside the band. Flagship. Knobs: `--count` / `--speed` / `--direction` / `--orb-size`. |
 
 Later additives (ink-bleed, light-leak, glitch, …) plug into the same contract.
 
@@ -81,6 +81,35 @@ default, CPU fallback on adapter failure). The browser / WebGPU half lands in #4
   shader and the CPU oracle, a core change with its own parity story. The CLI
   already reserves `--alpha` / `.mov` and rejects them with a clear
   not-yet-implemented error rather than silently baking opaque.
+
+## No.13 — orb-dissolve (conveyor sweep-wipe)
+
+No.13 is a **directional sweep-wipe**: a band of color orbs, flowing on orber's
+one-way conveyor, sweeps across the frame and washes the base from `from` to `to`
+as it passes. It is *not* a translucent cross-fade and *not* a global occlusion
+pulse — the orbs cover one perpendicular slice (the band) at a time, never the
+whole frame at once.
+
+- `t = 0`: the band is off the entry edge; the whole frame is `from`.
+- `t → 1`: the band (a strip perpendicular to the flow) sweeps from the entry
+  edge to the exit edge. **Ahead** of the band the base is still `from`;
+  **behind** it the base is already `to`. The `from → to` boundary (the *seam*)
+  always rides **inside** the band, so it is never directly visible — the orbs
+  (carrying `from`'s palette) wash over it and leave `to` in their wake.
+- `t = 1`: the band has left by the exit edge; the whole frame is `to`.
+
+The base layer is a hard directional `from → to` step at the **wipe front**
+`p(t)`, which travels off-frame at both ends along `--direction`
+(`lr`/`rl`/`tb`/`bt`); reversing the direction reverses which edge `to` grows
+from. The orbs tile a jittered grid whose cross-axis rows cover the band's full
+width (gap-free) and whose flow-axis columns give the band depth, centered on the
+front and riding a one-way drift (`--speed`); `--count` sets density and
+`--orb-size` scales the disc radius and band thickness. The mechanism is pinned
+by tests on both the CPU and GPU paths: t=0/t=1 endpoints, **monotone** growth of
+the `to` region (the front never retreats), and **seam coverage** (the from/to
+boundary is hidden under the band — no raw hard seam shows). Strict CPU↔GPU pixel
+parity is *not* required (orber itself split over exactly that rasterizer
+mismatch).
 
 ## Relationship to orber
 
