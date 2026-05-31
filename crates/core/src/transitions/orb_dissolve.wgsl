@@ -1,31 +1,34 @@
-// No.13 — orb-dissolve (production WGSL).
+// No.13 — orb-dissolve (production WGSL), full-occlusion redefinition.
 //
 // Composites, per fragment, in raw sRGB byte space (textures bound as
 // Rgba8Unorm, NOT *Srgb — same contract as crossfade.wgsl):
 //
-//   1. base   = `to`                              (opaque background)
-//   2. base    = mix(base, from, 1 - t)           (`from` fades out over the clip)
-//   3. for each live orb: blend its color over base by a soft radial falloff
-//      scaled by the orb's envelope alpha                (the drifting orb field)
+//   1. base = mix(to, from, base_from_weight(t))   (HARD `from→to` swap at t≈0.5,
+//      with a ±0.05 micro cross-fade — see `OrbDissolve::base_from_weight`)
+//   2. for each live orb: blend its color over base by a soft radial falloff
+//      scaled by the orb's envelope alpha            (the gap-free orb curtain)
 //
-// Strict per-pixel parity with the CPU/tiny-skia path is NOT a goal here (orber
-// itself split over exactly that mismatch); the falloff below is a simple smooth
-// disc that reads as an orb, not a tiny-skia gradient clone.
+// At the occlusion plateau (t≈0.5) the orbs are simultaneously largest and fully
+// opaque, so the base swap underneath is invisible: the frame becomes independent
+// of both `from` and `to` (full occlusion). The mechanism — base swap + orb
+// falloff (inner core at 0.7·radius, aspect-corrected isotropic distance) — is
+// kept in lockstep with the CPU oracle (`render_cpu_cfg`) so both renderers reach
+// the same full occlusion, even without strict per-pixel parity.
 //
 // Binding contract (see `gpu.rs` — orb-dissolve extends crossfade's bindings):
 //   group(0) binding(0): from texture (texture_2d<f32>)
 //   group(0) binding(1): to   texture (texture_2d<f32>)
 //   group(0) binding(2): sampler (non-filtering)
-//   group(0) binding(3): uniform Params { t, orb_count, _pad0, _pad1 }
+//   group(0) binding(3): uniform Params { t, orb_count, aspect_x, aspect_y }
 //   group(0) binding(4): uniform Orbs { orbs: array<Orb, MAX_ORBS> }
 
-const MAX_ORBS: u32 = 16u;
+const MAX_ORBS: u32 = 128u;
 
 struct Params {
     t: f32,
     orb_count: f32, // number of live orbs (as f32 to keep 16-byte alignment simple)
-    _pad0: f32,
-    _pad1: f32,
+    aspect_x: f32,  // width  / min(width, height) — UV→isotropic x scale
+    aspect_y: f32,  // height / min(width, height) — UV→isotropic y scale
 };
 
 // Each orb: pos (xy, normalized UV), radius (normalized by min axis), alpha
@@ -37,7 +40,7 @@ struct Orb {
 };
 
 struct Orbs {
-    orbs: array<Orb, 16>,
+    orbs: array<Orb, 128>,
 };
 
 @group(0) @binding(0) var from_tex: texture_2d<f32>;
@@ -65,18 +68,32 @@ fn vs_main(@builtin(vertex_index) vi: u32) -> VsOut {
     return out;
 }
 
+// from-weight of the base layer: a HARD swap at t=0.5 with a ±0.05 micro
+// cross-fade. Mirrors `OrbDissolve::base_from_weight` on the CPU exactly.
+fn base_from_weight(t: f32) -> f32 {
+    let half = 0.05;
+    let lo = 0.5 - half;
+    let hi = 0.5 + half;
+    if (t <= lo) {
+        return 1.0;
+    } else if (t >= hi) {
+        return 0.0;
+    }
+    return 1.0 - (t - lo) / (hi - lo);
+}
+
 @fragment
 fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let from_color = textureSample(from_tex, samp, in.uv);
     let to_color = textureSample(to_tex, samp, in.uv);
 
-    // 1+2: `to` background with `from` fading out.
-    var base = mix(to_color.rgb, from_color.rgb, 1.0 - params.t);
+    // 1: base = from→to HARD swap (orb curtain hides it across the plateau).
+    let fw = base_from_weight(params.t);
+    var base = mix(to_color.rgb, from_color.rgb, fw);
 
-    // Aspect-correct distance: radius is normalized by the short axis. We only
-    // have UV here, so approximate isotropy by working in UV space directly; the
-    // orb reads as an ellipse on non-square frames, which is acceptable for the
-    // 叩き台 mechanic (kako-jun tunes the look later).
+    // 2: gap-free orb curtain. Distance is aspect-corrected into shorter-axis
+    // units so radii read isotropically on non-square frames (matches the CPU
+    // oracle). The opaque core spans 0.7·radius for hole-free coverage.
     let count = u32(params.orb_count + 0.5);
     for (var i: u32 = 0u; i < MAX_ORBS; i = i + 1u) {
         if (i >= count) {
@@ -89,9 +106,14 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
         if (radius <= 0.0 || env <= 0.0) {
             continue;
         }
-        let d = distance(in.uv, center);
-        // Soft disc: full inside 40% of radius, smooth fade to the rim.
-        let inner = radius * 0.4;
+        // Toroidal (wrapped) delta: the orb field tiles [0,1]^2 and the conveyor
+        // wraps, so an orb near an edge also covers the opposite edge (no seam).
+        let wx = (in.uv.x - center.x) - floor((in.uv.x - center.x) + 0.5);
+        let wy = (in.uv.y - center.y) - floor((in.uv.y - center.y) + 0.5);
+        let dx = wx * params.aspect_x;
+        let dy = wy * params.aspect_y;
+        let d = sqrt(dx * dx + dy * dy);
+        let inner = radius * 0.7;
         let falloff = 1.0 - smoothstep(inner, radius, d);
         let a = clamp(falloff * env, 0.0, 1.0);
         base = mix(base, o.color.rgb, a);

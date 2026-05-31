@@ -17,7 +17,7 @@ Each additive has an E-number style designation and a stable kebab-case name:
 | Designation | Name           | Status      | Notes                                                        |
 | ----------- | -------------- | ----------- | ------------------------------------------------------------ |
 | No.0        | `crossfade`    | implemented | Linear cross-dissolve. Reference baseline + parity oracle.   |
-| No.13       | `orb-dissolve` | implemented | `from` shatters into drifting orbs (via orber-core) and clears to reveal `to`. Flagship. |
+| No.13       | `orb-dissolve` | implemented | A curtain of color orbs (palette via orber-core) **fully covers** the frame at the peak; the `from→to` base hard-swaps underneath, then the curtain clears to reveal `to`. Flagship. Knobs: `--count` / `--speed` / `--direction` / `--orb-size`. |
 
 Later additives (ink-bleed, light-leak, glitch, …) plug into the same contract.
 
@@ -81,6 +81,28 @@ default, CPU fallback on adapter failure). The browser / WebGPU half lands in #4
   shader and the CPU oracle, a core change with its own parity story. The CLI
   already reserves `--alpha` / `.mov` and rejects them with a clear
   not-yet-implemented error rather than silently baking opaque.
+
+## No.13 — orb-dissolve (full-occlusion wipe)
+
+No.13 is a **cover-then-swap** wipe, not a translucent cross-fade:
+
+- `t = 0`: pure `from` (orbs at radius 0).
+- `t → 0.5`: a curtain of color orbs grows and turns opaque until, across the
+  **occlusion plateau** around `t = 0.5`, it covers the whole frame — nothing of
+  either image shows through (full occlusion).
+- `t = 0.5`: the base layer **hard-swaps** `from → to` (with a ±0.05 micro
+  cross-fade), invisible under the curtain.
+- `t → 1`: the curtain shrinks / fades and recedes, revealing `to`.
+
+Coverage is guaranteed geometrically: orbs sit on a jittered near-square grid
+sized from `--count`, each radius driven by the occlusion envelope and scaled so
+neighbours overlap; the whole field rides orber's one-way conveyor along
+`--direction` (wrapping toroidally, so no seam shows), with `--speed` and
+`--orb-size` tuning drift and disc size. The **occupancy invariant** — at the
+peak the rendered frame is independent of the base image — is asserted by tests
+on both the CPU and GPU paths (mean base-swap diff ≈ 0). Strict CPU↔GPU pixel
+parity is *not* required (orber itself split over exactly that rasterizer
+mismatch); the tests pin the *mechanism* (envelope, hard swap, gap-free cover).
 
 ## Relationship to orber
 
