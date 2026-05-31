@@ -19,7 +19,8 @@ name = "additive"
 path = "src/main.rs"
 
 [dependencies]
-additive-core = { path = "../core", version = "0.1.0" }
+# CLI drives the production wgpu renderer, so enable core's `gpu` feature.
+additive-core = { path = "../core", version = "0.1.0", features = ["gpu"] }
 # CLI decodes arbitrary inputs, so add jpeg/webp on top of the workspace png.
 image = { workspace = true, features = ["jpeg"] }
 clap = { workspace = true }

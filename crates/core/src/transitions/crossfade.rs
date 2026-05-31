@@ -4,6 +4,11 @@ use image::RgbaImage;
 
 use crate::transition::Transition;
 
+/// WGSL production shader for [`Crossfade`]. Mirrors [`Crossfade::render_cpu`]
+/// in raw sRGB byte space (see the file header for the binding contract).
+#[cfg(feature = "gpu")]
+pub const CROSSFADE_WGSL: &str = include_str!("crossfade.wgsl");
+
 /// **No.0 — crossfade.** A plain linear cross-dissolve
 /// (`out = from·(1−t) + to·t`, per channel including alpha). The humble baseline
 /// of the series; it also doubles as the parity oracle wgpu additives are
@@ -39,6 +44,11 @@ impl Transition for Crossfade {
             }
         }
         out
+    }
+
+    #[cfg(feature = "gpu")]
+    fn shader_wgsl(&self) -> &'static str {
+        CROSSFADE_WGSL
     }
 }
 

@@ -26,6 +26,16 @@ pub trait Transition {
     /// `t` is clamped to `0.0..=1.0`. This is the parity oracle the wgpu renderer
     /// (#1) is checked against.
     fn render_cpu(&self, from: &RgbaImage, to: &RgbaImage, t: f32) -> RgbaImage;
+
+    /// WGSL fragment-shader body for the production (wgpu) render path.
+    ///
+    /// The shader is run by [`crate::gpu::GpuRenderer`] against a full-screen
+    /// triangle. It must define a fragment entry point `fs_main` that samples the
+    /// bound `from`/`to` textures and the `t` uniform, mixing them in **sRGB byte
+    /// space without gamma conversion** so the result matches [`render_cpu`]
+    /// channel-for-channel (see [`crate::gpu`] for the binding contract).
+    #[cfg(feature = "gpu")]
+    fn shader_wgsl(&self) -> &'static str;
 }
 
 /// All built-in transitions, in designation order.

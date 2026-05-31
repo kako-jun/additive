@@ -15,5 +15,15 @@ categories = ["graphics", "multimedia"]
 [lib]
 crate-type = ["cdylib", "rlib"]
 
+[features]
+# OFF (default): pure trait + CPU reference renderer. Keeps the wasm32 build
+# minimal and dependency-free beyond `image`.
+# ON: adds the wgpu (Rust + WGSL) production render path used by the native CLI.
+default = []
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
 [dependencies]
 image = { workspace = true }
+wgpu = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }

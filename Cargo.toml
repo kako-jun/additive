@@ -18,7 +18,10 @@ clap = { version = "4.5", features = ["derive"] }
 anyhow = "1"
 wasm-bindgen = "0.2"
 console_error_panic_hook = "0.1"
-# wgpu は #1（プロダクション・レンダラ）で追加する。
+# wgpu プロダクション・レンダラ（#1）。core の gpu feature でのみ有効化する。
+wgpu = "29"
+pollster = "0.4"
+bytemuck = { version = "1", features = ["derive"] }
 # orber-core は #2（No.13 玉化ディゾルブ）で git 依存として追加する。
 
 [profile.release]
