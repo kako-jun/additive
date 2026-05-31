@@ -39,19 +39,23 @@ path is checked against — not the production path.
 
 ## Usage
 
-```bash
-# A single frame at the midpoint of the transition
-additive-13 --from a.jpg --to b.jpg --output mid.png --t 0.5
+The product output is **video** — a transition is something you play, not a still.
 
-# A frame sequence over the whole transition
+```bash
+# A frame sequence over the whole transition (feeds the video encoder)
 additive-13 --from a.jpg --to b.jpg --frames 48 --out-dir frames/
 
 # List available additives
 additive-13 --list
+
+# Debug peek: render one frame at a given t (for eyeballing / parity tests, not a product feature)
+additive-13 --from a.jpg --to b.jpg --output peek.png --t 0.5
 ```
 
 Video muxing (opaque `mp4` and transparent `mov` for overlay compositing) lands
-with the wgpu renderer; see the roadmap.
+with the wgpu renderer; see the roadmap. Single-image *stylizing* is intentionally
+out of scope — that is [orber](https://github.com/kako-jun/orber)'s job. ADDITIVE-13
+is strictly two-input transitions.
 
 ## Layout
 
