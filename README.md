@@ -60,7 +60,10 @@ additive --list
 additive --from a.jpg --to b.jpg --output peek.png --t 0.5
 ```
 
-Baked video needs **ffmpeg** on your `PATH` (the CLI shells out to it). Opaque
+Baked video needs **ffmpeg** on your `PATH` (the CLI shells out to it). Video
+output rounds odd source dimensions *down* to even (e.g. 37×23 → 36×22), since
+H.264/VP9 `yuv420p` requires even width and height; `--duration-ms` is capped at
+600000 (10 minutes). Opaque
 `mp4` / `webm` work today; transparent `mov` for overlay compositing (`--alpha`)
 is a follow-up — see the roadmap. Single-image *stylizing* is intentionally out of
 scope — that is [orber](https://github.com/kako-jun/orber)'s job. ADDITIVE-13 is

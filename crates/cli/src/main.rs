@@ -15,7 +15,9 @@ use clap::{Parser, ValueEnum};
 use image::imageops::FilterType;
 use image::RgbaImage;
 
-use video::{calc_frame_count, render_video, VideoCodec, DEFAULT_DURATION_MS, DEFAULT_FPS};
+use video::{
+    calc_frame_count, check_duration, render_video, VideoCodec, DEFAULT_DURATION_MS, DEFAULT_FPS,
+};
 
 /// Which renderer backend to drive.
 #[derive(Copy, Clone, Debug, PartialEq, Eq, ValueEnum)]
@@ -55,6 +57,7 @@ struct Cli {
     t: f32,
 
     /// Clip length in milliseconds for video output (`.mp4` / `.webm`).
+    /// Capped at 600000 (10 minutes) to bound temp-dir frame output.
     #[arg(long, default_value_t = DEFAULT_DURATION_MS)]
     duration_ms: u64,
 
@@ -238,6 +241,8 @@ fn run_output(
     }
 
     if let Some(codec) = VideoCodec::from_path(output) {
+        check_duration(opts.duration_ms)
+            .with_context(|| format!("encoding {} (duration out of range)", output.display()))?;
         let total = calc_frame_count(opts.duration_ms, opts.fps);
         render_video(output, codec, total, opts.fps, |_, t| {
             renderer.render(tr, from, to, t)
