@@ -7,13 +7,16 @@
 ## ビルド・テスト
 
 ```bash
-cargo build
-cargo test
-cargo clippy --all-targets -- -D warnings
+cargo build                                   # CLI は gpu feature 有効（wgpu）
+cargo test                                    # feature 無し = CPU リファレンスのみ（速い）
+cargo test -p additive-core --features gpu    # GPU パリティテスト（Vulkan adapter が要る）
+cargo clippy --all-targets --all-features -- -D warnings
 cargo fmt --check
-# wasm ターゲットも通すこと（core / wasm が wasm32 でビルド可能であること）
+# wasm ターゲットも通すこと（core / wasm が wasm32 でビルド可能であること。gpu は付けない）
 cargo build --target wasm32-unknown-unknown -p additive-core -p additive-wasm
 ```
+
+レンダラ選択は `additive --renderer cpu|gpu`（デフォルト gpu、adapter 取得失敗時は cpu フォールバック）。
 
 ## ドキュメント
 

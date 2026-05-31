@@ -53,6 +53,14 @@ The CPU renderer in `additive-core` exists as the **reference / parity oracle**
 the wgpu path is verified against, and to give the web GUI a working (if slower)
 preview before the wgpu path lands.
 
+**Status (#1):** the native wgpu path is implemented behind the `gpu` cargo
+feature in `additive-core`. `No.0 crossfade` runs in WGSL, and a parity test
+confirms it matches the CPU oracle within ±2/channel on a real GPU (verified on
+Intel ADL-N via Vulkan; falls back to lavapipe or skips gracefully where no
+adapter exists). The CLI selects it by default (`--renderer cpu|gpu`, gpu
+default, CPU fallback on adapter failure). The browser / WebGPU half lands in #4;
+`additive-core` and `additive-wasm` still build for `wasm32` with the feature off.
+
 ## Output modes
 
 - **Baked** — composite `from → to` internally and emit an opaque `mp4` / `webm`.
