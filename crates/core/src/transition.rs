@@ -3,6 +3,8 @@
 use image::RgbaImage;
 
 use crate::transitions::crossfade::Crossfade;
+#[cfg(feature = "gpu")]
+use crate::transitions::orb_dissolve::OrbDissolve;
 
 /// A named transition effect — one "additive" in the series.
 ///
@@ -39,8 +41,17 @@ pub trait Transition {
 }
 
 /// All built-in transitions, in designation order.
+///
+/// No.13 orb-dissolve relies on the `orber-core` orb engine, which is pulled in
+/// only under the `gpu` feature, so it is registered only in that build. (The
+/// wasm / no-gpu build exposes just No.0 crossfade until the browser path lands.)
 pub fn all() -> Vec<Box<dyn Transition>> {
-    vec![Box::new(Crossfade)]
+    let transitions: Vec<Box<dyn Transition>> = vec![
+        Box::new(Crossfade),
+        #[cfg(feature = "gpu")]
+        Box::new(OrbDissolve),
+    ];
+    transitions
 }
 
 /// Look up a built-in transition by its kebab-case `name`.

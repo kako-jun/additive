@@ -6,7 +6,7 @@
 
 use std::path::PathBuf;
 
-use additive_core::{all, by_name, timeline, GpuRenderer, Transition};
+use additive_core::{all, by_name, timeline, GpuRenderer, OrbDissolve, Transition};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use image::imageops::FilterType;
@@ -94,7 +94,17 @@ impl FrameRenderer {
     fn render(&self, tr: &dyn Transition, from: &RgbaImage, to: &RgbaImage, t: f32) -> RgbaImage {
         match self {
             FrameRenderer::Cpu => tr.render_cpu(from, to, t),
-            FrameRenderer::Gpu(gpu) => gpu.render(from, to, tr.shader_wgsl(), t),
+            FrameRenderer::Gpu(gpu) => {
+                // No.13 orb-dissolve drives the orb-array GPU path; everything
+                // else uses the plain from/to/t crossfade-style pipeline.
+                if tr.name() == "orb-dissolve" {
+                    let pool = OrbDissolve::orb_pool(from);
+                    let orbs = OrbDissolve::gpu_orbs(&pool, t);
+                    gpu.render_orbs(from, to, tr.shader_wgsl(), t, &orbs)
+                } else {
+                    gpu.render(from, to, tr.shader_wgsl(), t)
+                }
+            }
         }
     }
 }

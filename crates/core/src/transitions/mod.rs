@@ -5,3 +5,4 @@
 //! reveal `to` beneath — lands in issue #2.
 
 pub mod crossfade;
+pub mod orb_dissolve;

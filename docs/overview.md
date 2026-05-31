@@ -17,7 +17,7 @@ Each additive has an E-number style designation and a stable kebab-case name:
 | Designation | Name           | Status      | Notes                                                        |
 | ----------- | -------------- | ----------- | ------------------------------------------------------------ |
 | No.0        | `crossfade`    | implemented | Linear cross-dissolve. Reference baseline + parity oracle.   |
-| No.13       | `orb-dissolve` | planned     | `from` shatters into drifting orbs (via orber-core) and clears to reveal `to`. Flagship. |
+| No.13       | `orb-dissolve` | implemented | `from` shatters into drifting orbs (via orber-core) and clears to reveal `to`. Flagship. |
 
 Later additives (ink-bleed, light-leak, glitch, …) plug into the same contract.
 
