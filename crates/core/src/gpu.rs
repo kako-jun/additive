@@ -28,6 +28,9 @@
 //! | 2                | sampler                          |
 //! | 3                | uniform `{ t: f32 }`             |
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+
 use image::RgbaImage;
 use wgpu::util::DeviceExt;
 
@@ -89,12 +92,51 @@ struct OrbArray {
     orbs: [GpuOrb; MAX_ORBS],
 }
 
-/// Headless wgpu renderer. Holds a device/queue; render any transition's WGSL
-/// against a `from`/`to` pair via [`GpuRenderer::render`].
+/// A render pipeline plus its bind-group layout and sampler, compiled once per
+/// distinct shader source. Caching this keeps shader compilation and pipeline
+/// creation off the per-frame path (issue #13): a long video renders the same
+/// `shader_wgsl` for every frame, so we compile it exactly once.
+struct CachedPipeline {
+    pipeline: wgpu::RenderPipeline,
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+}
+
+/// Per-dimension GPU resources reused across same-sized frames (issue #13): the
+/// uploaded `from`/`to` textures, the render target, and the padded read-back
+/// buffer. Reallocating these every frame is the other half of the per-frame
+/// cost the cache removes; a fixed-resolution clip allocates them once.
+struct SizedResources {
+    width: u32,
+    height: u32,
+    from_texture: wgpu::Texture,
+    from_view: wgpu::TextureView,
+    to_texture: wgpu::Texture,
+    to_view: wgpu::TextureView,
+    target: wgpu::Texture,
+    target_view: wgpu::TextureView,
+    output_buffer: wgpu::Buffer,
+    padded_bytes_per_row: u32,
+}
+
+/// Headless wgpu renderer. Holds a device/queue plus per-shader pipeline and
+/// per-size resource caches, so a multi-frame render (a long `--duration-ms`
+/// video) compiles each shader and allocates each texture/buffer only once
+/// instead of every frame (issue #13). Render any transition's WGSL against a
+/// `from`/`to` pair via [`GpuRenderer::render`].
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     adapter_name: String,
+    /// Crossfade-style pipelines, keyed by shader source.
+    pipeline_cache: RefCell<HashMap<String, CachedPipeline>>,
+    /// Orb-dissolve pipelines, keyed by shader source (separate bind-group
+    /// layout from the crossfade path, so a separate cache).
+    orb_pipeline_cache: RefCell<HashMap<String, CachedPipeline>>,
+    /// Per-size resources for the crossfade path, keyed by `(width, height)`.
+    sized_cache: RefCell<HashMap<(u32, u32), SizedResources>>,
+    /// Per-size resources for the orb path, keyed by `(width, height)`.
+    orb_sized_cache: RefCell<HashMap<(u32, u32), SizedResources>>,
 }
 
 impl GpuRenderer {
@@ -125,12 +167,254 @@ impl GpuRenderer {
             device,
             queue,
             adapter_name,
+            pipeline_cache: RefCell::new(HashMap::new()),
+            orb_pipeline_cache: RefCell::new(HashMap::new()),
+            sized_cache: RefCell::new(HashMap::new()),
+            orb_sized_cache: RefCell::new(HashMap::new()),
         })
     }
 
     /// Name of the underlying adapter (for diagnostics / proving the GPU path ran).
     pub fn adapter_name(&self) -> &str {
         &self.adapter_name
+    }
+
+    /// Get-or-build the crossfade-path pipeline for `shader_wgsl`, compiling the
+    /// shader and pipeline only on first use. The closure runs at most once per
+    /// distinct shader source for the life of the renderer.
+    fn crossfade_pipeline<R>(&self, shader_wgsl: &str, f: impl FnOnce(&CachedPipeline) -> R) -> R {
+        let mut cache = self.pipeline_cache.borrow_mut();
+        let entry = cache
+            .entry(shader_wgsl.to_owned())
+            .or_insert_with(|| self.build_crossfade_pipeline(shader_wgsl));
+        f(entry)
+    }
+
+    /// Compile the crossfade-style pipeline (binding 0/1 textures, 2 sampler, 3
+    /// uniform `Params`). Called once per shader by [`Self::crossfade_pipeline`].
+    fn build_crossfade_pipeline(&self, shader_wgsl: &str) -> CachedPipeline {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("additive-sampler"),
+            ..Default::default()
+        });
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("additive-bgl"),
+                    entries: &[
+                        texture_entry(0),
+                        texture_entry(1),
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                            count: None,
+                        },
+                        uniform_entry(3),
+                    ],
+                });
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("additive-shader"),
+                source: wgpu::ShaderSource::Wgsl(shader_wgsl.into()),
+            });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("additive-pl"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
+            });
+        let pipeline =
+            self.build_render_pipeline("additive-pipeline", &pipeline_layout, &shader, format);
+        CachedPipeline {
+            pipeline,
+            bind_group_layout,
+            sampler,
+        }
+    }
+
+    /// Create the full-screen-triangle render pipeline shared by both render
+    /// paths (`vs_main`/`fs_main`, single `Rgba8Unorm` target, no blend).
+    fn build_render_pipeline(
+        &self,
+        label: &str,
+        layout: &wgpu::PipelineLayout,
+        shader: &wgpu::ShaderModule,
+        format: wgpu::TextureFormat,
+    ) -> wgpu::RenderPipeline {
+        self.device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(layout),
+                vertex: wgpu::VertexState {
+                    module: shader,
+                    entry_point: Some("vs_main"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: shader,
+                    entry_point: Some("fs_main"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            })
+    }
+
+    /// Get-or-build the orb-path pipeline for `shader_wgsl` (binding 0/1 textures,
+    /// 2 sampler, 3 `OrbParams`, 4 `OrbArray`). Compiled once per shader source.
+    fn orb_pipeline<R>(&self, shader_wgsl: &str, f: impl FnOnce(&CachedPipeline) -> R) -> R {
+        let mut cache = self.orb_pipeline_cache.borrow_mut();
+        let entry = cache
+            .entry(shader_wgsl.to_owned())
+            .or_insert_with(|| self.build_orb_pipeline(shader_wgsl));
+        f(entry)
+    }
+
+    /// Compile the orb-dissolve pipeline. Called once per shader by
+    /// [`Self::orb_pipeline`].
+    fn build_orb_pipeline(&self, shader_wgsl: &str) -> CachedPipeline {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("additive-orb-sampler"),
+            ..Default::default()
+        });
+        let bind_group_layout =
+            self.device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("additive-orb-bgl"),
+                    entries: &[
+                        texture_entry(0),
+                        texture_entry(1),
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::FRAGMENT,
+                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
+                            count: None,
+                        },
+                        uniform_entry(3),
+                        uniform_entry(4),
+                    ],
+                });
+        let shader = self
+            .device
+            .create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("additive-orb-shader"),
+                source: wgpu::ShaderSource::Wgsl(shader_wgsl.into()),
+            });
+        let pipeline_layout = self
+            .device
+            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("additive-orb-pl"),
+                bind_group_layouts: &[Some(&bind_group_layout)],
+                immediate_size: 0,
+            });
+        let pipeline =
+            self.build_render_pipeline("additive-orb-pipeline", &pipeline_layout, &shader, format);
+        CachedPipeline {
+            pipeline,
+            bind_group_layout,
+            sampler,
+        }
+    }
+
+    /// Get-or-build the per-size resources for the given `cache`, allocating the
+    /// `from`/`to`/target textures and read-back buffer only on first use of a
+    /// `(width, height)`. The closure observes the (possibly freshly allocated)
+    /// resources.
+    fn sized_resources<R>(
+        cache: &RefCell<HashMap<(u32, u32), SizedResources>>,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        target_label: &str,
+        readback_label: &str,
+        f: impl FnOnce(&SizedResources) -> R,
+    ) -> R {
+        let mut map = cache.borrow_mut();
+        let entry = map.entry((width, height)).or_insert_with(|| {
+            Self::build_sized_resources(device, width, height, target_label, readback_label)
+        });
+        f(entry)
+    }
+
+    /// Allocate the `from`/`to`/target textures and the padded read-back buffer
+    /// for a `(width, height)`. Called once per size by [`Self::sized_resources`].
+    fn build_sized_resources(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+        target_label: &str,
+        readback_label: &str,
+    ) -> SizedResources {
+        let format = wgpu::TextureFormat::Rgba8Unorm;
+        let extent = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let make_input = |label: &str| {
+            let texture = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some(label),
+                size: extent,
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+            (texture, view)
+        };
+        let (from_texture, from_view) = make_input("additive-from");
+        let (to_texture, to_view) = make_input("additive-to");
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some(target_label),
+            size: extent,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
+
+        let unpadded_bytes_per_row = width * BYTES_PER_PIXEL;
+        let padded_bytes_per_row = align_up(unpadded_bytes_per_row, ROW_ALIGNMENT);
+        let output_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(readback_label),
+            size: (padded_bytes_per_row * height) as u64,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+
+        SizedResources {
+            width,
+            height,
+            from_texture,
+            from_view,
+            to_texture,
+            to_view,
+            target,
+            target_view,
+            output_buffer,
+            padded_bytes_per_row,
+        }
     }
 
     /// Render one frame: upload `from`/`to`, run `shader_wgsl` over a full-screen
@@ -152,34 +436,6 @@ impl GpuRenderer {
             return RgbaImage::new(width, height);
         }
 
-        // sRGB-byte parity: NOT *Srgb. Sampling and rendering stay in raw bytes.
-        let format = wgpu::TextureFormat::Rgba8Unorm;
-        let extent = wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        };
-
-        let from_view = self.upload_texture(from, format, "additive-from");
-        let to_view = self.upload_texture(to, format, "additive-to");
-
-        let target = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("additive-target"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("additive-sampler"),
-            ..Default::default()
-        });
-
         let params = Params { t, _pad: [0.0; 3] };
         let uniform_buffer = self
             .device
@@ -189,173 +445,54 @@ impl GpuRenderer {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
-        let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("additive-bgl"),
-                    entries: &[
-                        texture_entry(0),
-                        texture_entry(1),
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                            count: None,
-                        },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 3,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Uniform,
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
+        // Pipeline (shader compile) cached per shader source; textures and the
+        // read-back buffer cached per size. Only the texture contents and the
+        // tiny uniform/bind group are rebuilt per frame (issue #13).
+        self.crossfade_pipeline(shader_wgsl, |cached| {
+            Self::sized_resources(
+                &self.sized_cache,
+                &self.device,
+                width,
+                height,
+                "additive-target",
+                "additive-readback",
+                |res| {
+                    self.write_texture_data(&res.from_texture, from);
+                    self.write_texture_data(&res.to_texture, to);
+
+                    let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("additive-bg"),
+                        layout: &cached.bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&res.from_view),
                             },
-                            count: None,
-                        },
-                    ],
-                });
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&res.to_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&cached.sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: uniform_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
 
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("additive-bg"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&from_view),
+                    self.run_pass_and_readback(
+                        &cached.pipeline,
+                        &bind_group,
+                        res,
+                        "additive-encoder",
+                        "additive-pass",
+                    )
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&to_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: uniform_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("additive-shader"),
-                source: wgpu::ShaderSource::Wgsl(shader_wgsl.into()),
-            });
-
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("additive-pl"),
-                bind_group_layouts: &[Some(&bind_group_layout)],
-                immediate_size: 0,
-            });
-
-        let pipeline = self
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("additive-pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
-
-        // Read-back buffer: each row padded up to ROW_ALIGNMENT bytes.
-        let unpadded_bytes_per_row = width * BYTES_PER_PIXEL;
-        let padded_bytes_per_row = align_up(unpadded_bytes_per_row, ROW_ALIGNMENT);
-        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("additive-readback"),
-            size: (padded_bytes_per_row * height) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("additive-encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("additive-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &output_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            extent,
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        // Map and block until ready.
-        let slice = output_buffer.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("device poll failed");
-
-        let mapped = slice.get_mapped_range();
-        // Strip the row padding: copy the leading `unpadded_bytes_per_row` of each row.
-        let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
-        for row in 0..height {
-            let start = (row * padded_bytes_per_row) as usize;
-            let end = start + unpadded_bytes_per_row as usize;
-            pixels.extend_from_slice(&mapped[start..end]);
-        }
-        drop(mapped);
-        output_buffer.unmap();
-
-        RgbaImage::from_raw(width, height, pixels)
-            .expect("read-back buffer matches image dimensions")
+            )
+        })
     }
 
     /// Render one orb-dissolve frame: same `from`/`to`/`t` contract as
@@ -387,33 +524,6 @@ impl GpuRenderer {
         if width == 0 || height == 0 {
             return RgbaImage::new(width, height);
         }
-
-        let format = wgpu::TextureFormat::Rgba8Unorm;
-        let extent = wgpu::Extent3d {
-            width,
-            height,
-            depth_or_array_layers: 1,
-        };
-
-        let from_view = self.upload_texture(from, format, "additive-from");
-        let to_view = self.upload_texture(to, format, "additive-to");
-
-        let target = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("additive-orb-target"),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-            view_formats: &[],
-        });
-        let target_view = target.create_view(&wgpu::TextureViewDescriptor::default());
-
-        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("additive-orb-sampler"),
-            ..Default::default()
-        });
 
         let orb_count = orbs.len().min(MAX_ORBS);
         // UV→isotropic scales: radii are normalized by the shorter axis, so the
@@ -453,194 +563,74 @@ impl GpuRenderer {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
-        let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("additive-orb-bgl"),
-                    entries: &[
-                        texture_entry(0),
-                        texture_entry(1),
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                            count: None,
-                        },
-                        uniform_entry(3),
-                        uniform_entry(4),
-                    ],
-                });
+        // Pipeline (shader compile) cached per shader source; textures and the
+        // read-back buffer cached per size. The orb path uses its own caches
+        // because its bind-group layout (binding 3/4 uniforms) differs from the
+        // crossfade path (issue #13).
+        self.orb_pipeline(shader_wgsl, |cached| {
+            Self::sized_resources(
+                &self.orb_sized_cache,
+                &self.device,
+                width,
+                height,
+                "additive-orb-target",
+                "additive-orb-readback",
+                |res| {
+                    self.write_texture_data(&res.from_texture, from);
+                    self.write_texture_data(&res.to_texture, to);
 
-        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("additive-orb-bg"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&from_view),
+                    let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("additive-orb-bg"),
+                        layout: &cached.bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&res.from_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&res.to_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&cached.sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: orb_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+
+                    self.run_pass_and_readback(
+                        &cached.pipeline,
+                        &bind_group,
+                        res,
+                        "additive-orb-encoder",
+                        "additive-orb-pass",
+                    )
                 },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&to_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: params_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: orb_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("additive-orb-shader"),
-                source: wgpu::ShaderSource::Wgsl(shader_wgsl.into()),
-            });
-
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("additive-orb-pl"),
-                bind_group_layouts: &[Some(&bind_group_layout)],
-                immediate_size: 0,
-            });
-
-        let pipeline = self
-            .device
-            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                label: Some("additive-orb-pipeline"),
-                layout: Some(&pipeline_layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_main"),
-                    compilation_options: Default::default(),
-                    buffers: &[],
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_main"),
-                    compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
-                }),
-                primitive: wgpu::PrimitiveState::default(),
-                depth_stencil: None,
-                multisample: wgpu::MultisampleState::default(),
-                multiview_mask: None,
-                cache: None,
-            });
-
-        let unpadded_bytes_per_row = width * BYTES_PER_PIXEL;
-        let padded_bytes_per_row = align_up(unpadded_bytes_per_row, ROW_ALIGNMENT);
-        let output_buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("additive-orb-readback"),
-            size: (padded_bytes_per_row * height) as u64,
-            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("additive-orb-encoder"),
-            });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("additive-orb-pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &target_view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-            pass.set_pipeline(&pipeline);
-            pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
-        }
-        encoder.copy_texture_to_buffer(
-            wgpu::TexelCopyTextureInfo {
-                texture: &target,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyBufferInfo {
-                buffer: &output_buffer,
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(padded_bytes_per_row),
-                    rows_per_image: Some(height),
-                },
-            },
-            extent,
-        );
-        self.queue.submit(Some(encoder.finish()));
-
-        let slice = output_buffer.slice(..);
-        slice.map_async(wgpu::MapMode::Read, |_| {});
-        self.device
-            .poll(wgpu::PollType::wait_indefinitely())
-            .expect("device poll failed");
-
-        let mapped = slice.get_mapped_range();
-        let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
-        for row in 0..height {
-            let start = (row * padded_bytes_per_row) as usize;
-            let end = start + unpadded_bytes_per_row as usize;
-            pixels.extend_from_slice(&mapped[start..end]);
-        }
-        drop(mapped);
-        output_buffer.unmap();
-
-        RgbaImage::from_raw(width, height, pixels)
-            .expect("read-back buffer matches image dimensions")
+            )
+        })
     }
 
-    /// Upload an `RgbaImage` into a sampled texture and return its view.
-    fn upload_texture(
-        &self,
-        img: &RgbaImage,
-        format: wgpu::TextureFormat,
-        label: &str,
-    ) -> wgpu::TextureView {
+    /// Upload an `RgbaImage`'s bytes into an existing same-sized texture. The
+    /// texture is allocated once per size and reused across frames; only its
+    /// contents change per frame (issue #13).
+    fn write_texture_data(&self, texture: &wgpu::Texture, img: &RgbaImage) {
         let (width, height) = img.dimensions();
         let extent = wgpu::Extent3d {
             width,
             height,
             depth_or_array_layers: 1,
         };
-        let texture = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some(label),
-            size: extent,
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
         self.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &texture,
+                texture,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -653,7 +643,90 @@ impl GpuRenderer {
             },
             extent,
         );
-        texture.create_view(&wgpu::TextureViewDescriptor::default())
+    }
+
+    /// Render one full-screen pass into `res.target`, copy it into the read-back
+    /// buffer, map it, and strip wgpu's row padding into a tight `RgbaImage`.
+    /// Shared by [`Self::render`] and [`Self::render_orbs`] once their bind
+    /// group is built.
+    fn run_pass_and_readback(
+        &self,
+        pipeline: &wgpu::RenderPipeline,
+        bind_group: &wgpu::BindGroup,
+        res: &SizedResources,
+        encoder_label: &str,
+        pass_label: &str,
+    ) -> RgbaImage {
+        let (width, height) = (res.width, res.height);
+        let extent = wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        };
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some(encoder_label),
+            });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(pass_label),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &res.target_view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(pipeline);
+            pass.set_bind_group(0, bind_group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &res.target,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &res.output_buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(res.padded_bytes_per_row),
+                    rows_per_image: Some(height),
+                },
+            },
+            extent,
+        );
+        self.queue.submit(Some(encoder.finish()));
+
+        let slice = res.output_buffer.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        self.device
+            .poll(wgpu::PollType::wait_indefinitely())
+            .expect("device poll failed");
+
+        let unpadded_bytes_per_row = width * BYTES_PER_PIXEL;
+        let mapped = slice.get_mapped_range();
+        let mut pixels = Vec::with_capacity((unpadded_bytes_per_row * height) as usize);
+        for row in 0..height {
+            let start = (row * res.padded_bytes_per_row) as usize;
+            let end = start + unpadded_bytes_per_row as usize;
+            pixels.extend_from_slice(&mapped[start..end]);
+        }
+        drop(mapped);
+        res.output_buffer.unmap();
+
+        RgbaImage::from_raw(width, height, pixels)
+            .expect("read-back buffer matches image dimensions")
     }
 }
 
