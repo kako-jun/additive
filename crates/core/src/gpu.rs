@@ -1082,4 +1082,155 @@ mod tests {
             "gpu seam must be hidden under the orb band (covered {frac:.2})"
         );
     }
+
+    /// **Cache-reuse correctness (issue #13, state transition).** The per-size
+    /// textures and read-back buffer are now allocated once and reused for every
+    /// subsequent same-sized frame. The risk that introduces is *stale data*: a
+    /// reused `from`/`to` texture or read-back buffer that still carries the
+    /// previous frame's bytes. This renders two frames with **different inputs at
+    /// the same size** on one renderer (so the second frame hits the cached
+    /// resources) and asserts each output matches a *fresh* renderer's single
+    /// render of the same inputs. If reuse leaked stale texture/buffer contents,
+    /// the second frame would diverge from the fresh oracle.
+    #[test]
+    fn cached_resources_do_not_leak_previous_frame() {
+        let Some(renderer) = GpuRenderer::new() else {
+            eprintln!("SKIP cached_resources_do_not_leak_previous_frame: no GPU adapter available");
+            return;
+        };
+
+        let (w, h) = (40u32, 24u32);
+        // Two visually distinct (from, to) pairs rendered back-to-back at one size.
+        let from_a = gradient(w, h, [10, 200, 30, 255]);
+        let to_a = gradient(w, h, [220, 10, 40, 255]);
+        let from_b = gradient(w, h, [5, 15, 240, 255]);
+        let to_b = gradient(w, h, [250, 240, 5, 255]);
+
+        // Frame A allocates the cache; frame B reuses every cached resource.
+        let a_cached = renderer.render(&from_a, &to_a, CROSSFADE_WGSL, 0.3);
+        let b_cached = renderer.render(&from_b, &to_b, CROSSFADE_WGSL, 0.7);
+
+        // Each cache entry must exist exactly once (reuse really happened).
+        let (cf_pipes, _, cf_sizes, _) = renderer.cache_sizes();
+        assert_eq!(cf_pipes, 1, "both frames must share one cached pipeline");
+        assert_eq!(cf_sizes, 1, "both frames must share one cached size");
+
+        // Oracle: a brand-new renderer that has never seen frame A's inputs, so
+        // its textures/buffer start clean.
+        let Some(fresh) = GpuRenderer::new() else {
+            eprintln!("SKIP oracle leg: no second GPU adapter available");
+            return;
+        };
+        let b_fresh = fresh.render(&from_b, &to_b, CROSSFADE_WGSL, 0.7);
+
+        // The reused-resource render of frame B must equal the clean render of B.
+        let max_diff =
+            assert_within_tolerance(&b_fresh, &b_cached, "reused frame B must match a clean render");
+        eprintln!("reuse-vs-fresh frame B: max per-channel diff = {max_diff}");
+
+        // And frame A itself must still be a valid crossfade (sanity: the two
+        // frames are genuinely different, so this isn't a no-op comparison).
+        let a_fresh = fresh.render(&from_a, &to_a, CROSSFADE_WGSL, 0.3);
+        assert_within_tolerance(&a_fresh, &a_cached, "frame A must also match a clean render");
+        assert!(
+            a_cached
+                .pixels()
+                .zip(b_cached.pixels())
+                .any(|(p, q)| p.0 != q.0),
+            "frames A and B must actually differ (otherwise reuse is untested)"
+        );
+    }
+
+    /// **Pipeline cache keying (issue #13, branch/keying).** The pipeline cache is
+    /// keyed by shader *source string*. A second, byte-distinct shader source must
+    /// produce a second cache entry (a separate compilation), while re-rendering
+    /// the first source must not. The existing clip test only ever feeds one
+    /// shader per path, so the keying itself is otherwise unexercised. The second
+    /// source here is `CROSSFADE_WGSL` plus a trailing comment: behaviorally
+    /// identical, lexically different — so we also confirm its output still matches
+    /// the CPU oracle, proving the variant compiled and ran rather than silently
+    /// collided with the first entry.
+    #[test]
+    fn distinct_shader_sources_each_get_a_pipeline() {
+        let Some(renderer) = GpuRenderer::new() else {
+            eprintln!("SKIP distinct_shader_sources_each_get_a_pipeline: no GPU adapter available");
+            return;
+        };
+
+        let (w, h) = (32u32, 20u32);
+        let from = gradient(w, h, [20, 90, 60, 255]);
+        let to = gradient(w, h, [180, 30, 120, 255]);
+
+        // Byte-distinct but behaviorally identical: a trailing comment changes the
+        // source string (cache key) without changing the rendered result.
+        let variant_wgsl = format!("{CROSSFADE_WGSL}\n// cache-key variant\n");
+        assert_ne!(
+            variant_wgsl, CROSSFADE_WGSL,
+            "the variant must be a distinct source string"
+        );
+
+        // First source compiles -> one pipeline.
+        let _ = renderer.render(&from, &to, CROSSFADE_WGSL, 0.5);
+        let (cf_pipes, ..) = renderer.cache_sizes();
+        assert_eq!(cf_pipes, 1, "first shader source -> one pipeline");
+
+        // Re-rendering the SAME source must not add a pipeline.
+        let _ = renderer.render(&from, &to, CROSSFADE_WGSL, 0.6);
+        let (cf_pipes, ..) = renderer.cache_sizes();
+        assert_eq!(cf_pipes, 1, "same source re-render must not recompile");
+
+        // A distinct source string -> a second pipeline entry.
+        let variant_out = renderer.render(&from, &to, &variant_wgsl, 0.5);
+        let (cf_pipes, ..) = renderer.cache_sizes();
+        assert_eq!(
+            cf_pipes, 2,
+            "a byte-distinct shader source must compile a second pipeline"
+        );
+
+        // The variant actually ran correctly (matches the CPU crossfade oracle),
+        // proving it got its own working pipeline rather than a stale collision.
+        let cpu = Crossfade.render_cpu(&from, &to, 0.5);
+        let max_diff =
+            assert_within_tolerance(&cpu, &variant_out, "variant shader must match CPU crossfade");
+        eprintln!("variant-shader vs CPU: max per-channel diff = {max_diff}");
+    }
+
+    /// **Sized-cache revisit (issue #13, A→B→A state transition).** The clip test
+    /// proves a *new* size grows the sized cache. It never returns to an earlier
+    /// size, so it can't catch a keying bug that re-allocates on revisit. Here we
+    /// render at size A, then B, then A again, and assert the crossfade sized cache
+    /// holds exactly two entries throughout the revisit — the second render at A
+    /// reused its entry rather than inserting a duplicate or a third.
+    #[test]
+    fn revisiting_a_size_reuses_its_cached_entry() {
+        let Some(renderer) = GpuRenderer::new() else {
+            eprintln!("SKIP revisiting_a_size_reuses_its_cached_entry: no GPU adapter available");
+            return;
+        };
+
+        let (wa, ha) = (40u32, 24u32);
+        let (wb, hb) = (24u32, 40u32);
+        let from_a = gradient(wa, ha, [10, 40, 80, 255]);
+        let to_a = gradient(wa, ha, [200, 90, 20, 255]);
+        let from_b = gradient(wb, hb, [10, 40, 80, 255]);
+        let to_b = gradient(wb, hb, [200, 90, 20, 255]);
+
+        let _ = renderer.render(&from_a, &to_a, CROSSFADE_WGSL, 0.4);
+        let (.., cf_sizes, _) = renderer.cache_sizes();
+        assert_eq!(cf_sizes, 1, "size A -> one sized entry");
+
+        let _ = renderer.render(&from_b, &to_b, CROSSFADE_WGSL, 0.4);
+        let (.., cf_sizes, _) = renderer.cache_sizes();
+        assert_eq!(cf_sizes, 2, "size B -> a second sized entry");
+
+        // Revisit A: must reuse, not grow to three.
+        let _ = renderer.render(&from_a, &to_a, CROSSFADE_WGSL, 0.6);
+        let (cf_pipes, .., cf_sizes, _) = renderer.cache_sizes();
+        eprintln!("after A,B,A: cf_pipes={cf_pipes} cf_sizes={cf_sizes}");
+        assert_eq!(
+            cf_sizes, 2,
+            "revisiting size A must reuse its entry, not allocate a third"
+        );
+        assert_eq!(cf_pipes, 1, "one shader source -> still one pipeline");
+    }
 }
