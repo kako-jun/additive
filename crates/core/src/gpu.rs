@@ -124,6 +124,13 @@ struct SizedResources {
 /// video) compiles each shader and allocates each texture/buffer only once
 /// instead of every frame (issue #13). Render any transition's WGSL against a
 /// `from`/`to` pair via [`GpuRenderer::render`].
+///
+/// The caches are unbounded and never evict: a renderer that renders many
+/// distinct `(width, height)` sizes (or many distinct shader sources) keeps the
+/// textures/buffers/pipelines for every one of them alive for its whole
+/// lifetime. This is intentional for the single-resolution clip use case the
+/// renderer targets; a caller that streams arbitrarily many sizes through one
+/// long-lived renderer should drop and rebuild it to release memory.
 pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -1124,20 +1131,108 @@ mod tests {
         let b_fresh = fresh.render(&from_b, &to_b, CROSSFADE_WGSL, 0.7);
 
         // The reused-resource render of frame B must equal the clean render of B.
-        let max_diff =
-            assert_within_tolerance(&b_fresh, &b_cached, "reused frame B must match a clean render");
+        let max_diff = assert_within_tolerance(
+            &b_fresh,
+            &b_cached,
+            "reused frame B must match a clean render",
+        );
         eprintln!("reuse-vs-fresh frame B: max per-channel diff = {max_diff}");
 
         // And frame A itself must still be a valid crossfade (sanity: the two
         // frames are genuinely different, so this isn't a no-op comparison).
         let a_fresh = fresh.render(&from_a, &to_a, CROSSFADE_WGSL, 0.3);
-        assert_within_tolerance(&a_fresh, &a_cached, "frame A must also match a clean render");
+        assert_within_tolerance(
+            &a_fresh,
+            &a_cached,
+            "frame A must also match a clean render",
+        );
         assert!(
             a_cached
                 .pixels()
                 .zip(b_cached.pixels())
                 .any(|(p, q)| p.0 != q.0),
             "frames A and B must actually differ (otherwise reuse is untested)"
+        );
+    }
+
+    /// **Cache-reuse correctness, orb path (issue #13, state transition).** The
+    /// symmetric counterpart of [`cached_resources_do_not_leak_previous_frame`]
+    /// for the orb-dissolve path: `orb_sized_cache` reuses the same
+    /// `write_texture_data`/`SizedResources` mechanism, so it carries the same
+    /// stale-data risk on its reused `from`/`to` textures and read-back buffer.
+    /// `caches_resources_across_a_clip` only checks orb *entry counts*, never orb
+    /// reuse *correctness*. Here we render two orb frames with **different inputs
+    /// at the same size** back-to-back on one renderer (the second hits the cached
+    /// resources) and assert each matches a *fresh* renderer's single render of
+    /// the same inputs. If reuse leaked stale texture/buffer contents, the second
+    /// frame would diverge from the fresh oracle.
+    #[test]
+    fn cached_orb_resources_do_not_leak_previous_frame() {
+        use crate::transitions::orb_dissolve::{OrbConfig, OrbDissolve, ORB_DISSOLVE_WGSL};
+
+        let Some(renderer) = GpuRenderer::new() else {
+            eprintln!(
+                "SKIP cached_orb_resources_do_not_leak_previous_frame: no GPU adapter available"
+            );
+            return;
+        };
+
+        let (w, h) = (40u32, 24u32);
+        // Two visually distinct (from, to) pairs rendered back-to-back at one size.
+        let from_a = gradient(w, h, [10, 200, 30, 255]);
+        let to_a = gradient(w, h, [220, 10, 40, 255]);
+        let from_b = gradient(w, h, [5, 15, 240, 255]);
+        let to_b = gradient(w, h, [250, 240, 5, 255]);
+        let cfg = OrbConfig::default();
+
+        let orb_frame = |r: &GpuRenderer, from: &RgbaImage, to: &RgbaImage, t: f32| {
+            let orbs = OrbDissolve::gpu_orbs(from, &cfg, t);
+            let (front, code) = OrbDissolve::sweep_params(&cfg, t);
+            r.render_orbs(from, to, ORB_DISSOLVE_WGSL, t, &orbs, front, code)
+        };
+
+        // Frame A allocates the orb cache; frame B reuses every cached resource.
+        let a_cached = orb_frame(&renderer, &from_a, &to_a, 0.3);
+        let b_cached = orb_frame(&renderer, &from_b, &to_b, 0.7);
+
+        // The orb caches must each hold exactly one entry (reuse really happened).
+        let (_, orb_pipes, _, orb_sizes) = renderer.cache_sizes();
+        assert_eq!(
+            orb_pipes, 1,
+            "both frames must share one cached orb pipeline"
+        );
+        assert_eq!(orb_sizes, 1, "both frames must share one cached orb size");
+
+        // Oracle: a brand-new renderer that has never seen frame A's inputs, so
+        // its textures/buffer start clean.
+        let Some(fresh) = GpuRenderer::new() else {
+            eprintln!("SKIP oracle leg: no second GPU adapter available");
+            return;
+        };
+
+        // The reused-resource render of frame B must equal the clean render of B.
+        let b_fresh = orb_frame(&fresh, &from_b, &to_b, 0.7);
+        let max_diff = assert_within_tolerance(
+            &b_fresh,
+            &b_cached,
+            "reused orb frame B must match a clean render",
+        );
+        eprintln!("orb reuse-vs-fresh frame B: max per-channel diff = {max_diff}");
+
+        // And frame A must still match a clean render too — and the two frames
+        // must genuinely differ, so this isn't a no-op comparison.
+        let a_fresh = orb_frame(&fresh, &from_a, &to_a, 0.3);
+        assert_within_tolerance(
+            &a_fresh,
+            &a_cached,
+            "orb frame A must also match a clean render",
+        );
+        assert!(
+            a_cached
+                .pixels()
+                .zip(b_cached.pixels())
+                .any(|(p, q)| p.0 != q.0),
+            "orb frames A and B must actually differ (otherwise reuse is untested)"
         );
     }
 
@@ -1190,8 +1285,11 @@ mod tests {
         // The variant actually ran correctly (matches the CPU crossfade oracle),
         // proving it got its own working pipeline rather than a stale collision.
         let cpu = Crossfade.render_cpu(&from, &to, 0.5);
-        let max_diff =
-            assert_within_tolerance(&cpu, &variant_out, "variant shader must match CPU crossfade");
+        let max_diff = assert_within_tolerance(
+            &cpu,
+            &variant_out,
+            "variant shader must match CPU crossfade",
+        );
         eprintln!("variant-shader vs CPU: max per-channel diff = {max_diff}");
     }
 
