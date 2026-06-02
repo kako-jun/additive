@@ -179,6 +179,22 @@ impl GpuRenderer {
         &self.adapter_name
     }
 
+    /// Live entry counts of the four resource caches, in the order
+    /// `(crossfade pipelines, orb pipelines, crossfade sizes, orb sizes)`.
+    /// Exposed for the cache-effectiveness test (issue #13): rendering a clip of
+    /// many frames at one size with one shader must leave exactly one pipeline
+    /// and one sized entry, proving compilation/allocation stayed off the
+    /// per-frame path.
+    #[cfg(test)]
+    fn cache_sizes(&self) -> (usize, usize, usize, usize) {
+        (
+            self.pipeline_cache.borrow().len(),
+            self.orb_pipeline_cache.borrow().len(),
+            self.sized_cache.borrow().len(),
+            self.orb_sized_cache.borrow().len(),
+        )
+    }
+
     /// Get-or-build the crossfade-path pipeline for `shader_wgsl`, compiling the
     /// shader and pipeline only on first use. The closure runs at most once per
     /// distinct shader source for the life of the renderer.
@@ -943,6 +959,77 @@ mod tests {
             );
             prev = frac;
         }
+    }
+
+    /// **Cache-effectiveness test (issue #13).** Rendering a whole clip — many
+    /// frames at a fixed size with a fixed shader — must compile the pipeline and
+    /// allocate the per-size textures/read-back buffer exactly once, not per
+    /// frame. We assert the four resource caches each hold a single entry after
+    /// the clip, and that adding a second distinct size grows only the sized
+    /// caches (the pipeline caches stay at one). This is the mechanism the issue
+    /// asks for: shader compilation and texture allocation stay off the hot path.
+    #[test]
+    fn caches_resources_across_a_clip() {
+        use crate::transitions::crossfade::CROSSFADE_WGSL;
+        use crate::transitions::orb_dissolve::{OrbConfig, OrbDissolve, ORB_DISSOLVE_WGSL};
+
+        let Some(renderer) = GpuRenderer::new() else {
+            eprintln!("SKIP caches_resources_across_a_clip: no GPU adapter available");
+            return;
+        };
+
+        let (w, h) = (48u32, 32u32);
+        let from = gradient(w, h, [30, 60, 90, 255]);
+        let to = gradient(w, h, [180, 120, 40, 255]);
+        let cfg = OrbConfig::default();
+
+        // A 16-frame clip on both paths. Same shader, same size every frame.
+        for k in 0..16 {
+            let t = k as f32 / 15.0;
+            let _ = renderer.render(&from, &to, CROSSFADE_WGSL, t);
+            let orbs = OrbDissolve::gpu_orbs(&from, &cfg, t);
+            let (front, code) = OrbDissolve::sweep_params(&cfg, t);
+            let _ = renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, t, &orbs, front, code);
+        }
+
+        let (cf_pipes, orb_pipes, cf_sizes, orb_sizes) = renderer.cache_sizes();
+        eprintln!(
+            "after 16-frame clip: cf_pipes={cf_pipes} orb_pipes={orb_pipes} \
+             cf_sizes={cf_sizes} orb_sizes={orb_sizes}"
+        );
+        assert_eq!(cf_pipes, 1, "crossfade shader must compile exactly once");
+        assert_eq!(orb_pipes, 1, "orb shader must compile exactly once");
+        assert_eq!(cf_sizes, 1, "crossfade size must allocate exactly once");
+        assert_eq!(orb_sizes, 1, "orb size must allocate exactly once");
+
+        // A second, different size adds one sized entry per path but reuses the
+        // already-compiled pipelines.
+        let (w2, h2) = (24u32, 24u32);
+        let from2 = gradient(w2, h2, [30, 60, 90, 255]);
+        let to2 = gradient(w2, h2, [180, 120, 40, 255]);
+        let _ = renderer.render(&from2, &to2, CROSSFADE_WGSL, 0.5);
+        let orbs2 = OrbDissolve::gpu_orbs(&from2, &cfg, 0.5);
+        let (front2, code2) = OrbDissolve::sweep_params(&cfg, 0.5);
+        let _ = renderer.render_orbs(&from2, &to2, ORB_DISSOLVE_WGSL, 0.5, &orbs2, front2, code2);
+
+        let (cf_pipes, orb_pipes, cf_sizes, orb_sizes) = renderer.cache_sizes();
+        eprintln!(
+            "after second size: cf_pipes={cf_pipes} orb_pipes={orb_pipes} \
+             cf_sizes={cf_sizes} orb_sizes={orb_sizes}"
+        );
+        assert_eq!(
+            cf_pipes, 1,
+            "second size must not recompile the crossfade shader"
+        );
+        assert_eq!(
+            orb_pipes, 1,
+            "second size must not recompile the orb shader"
+        );
+        assert_eq!(
+            cf_sizes, 2,
+            "second size must add one crossfade sized entry"
+        );
+        assert_eq!(orb_sizes, 2, "second size must add one orb sized entry");
     }
 
     /// **Core GPU seam test.** Mid-clip, the from/to seam in the base must be
