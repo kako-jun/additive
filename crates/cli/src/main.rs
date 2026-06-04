@@ -156,7 +156,9 @@ impl Cli {
 /// no adapter is available.
 enum FrameRenderer {
     Cpu,
-    Gpu(GpuRenderer),
+    // Boxed: `GpuRenderer` now carries per-shader/per-size resource caches
+    // (issue #13), so it dwarfs the unit `Cpu` variant.
+    Gpu(Box<GpuRenderer>),
 }
 
 impl FrameRenderer {
@@ -168,7 +170,7 @@ impl FrameRenderer {
             Renderer::Gpu => match GpuRenderer::new() {
                 Some(gpu) => {
                     eprintln!("using gpu renderer (adapter: {})", gpu.adapter_name());
-                    FrameRenderer::Gpu(gpu)
+                    FrameRenderer::Gpu(Box::new(gpu))
                 }
                 None => {
                     eprintln!("warning: no GPU adapter available; falling back to cpu renderer");
