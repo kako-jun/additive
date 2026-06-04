@@ -102,6 +102,41 @@ struct CachedPipeline {
     sampler: wgpu::Sampler,
 }
 
+/// The bind-group-layout *shape* a render pipeline needs.
+///
+/// Every additive's pipeline binds `from`/`to` textures (0, 1), a sampler (2),
+/// and the `t` uniform (3); the orb path binds one extra uniform (4) for its orb
+/// array. Encoding that one-bit difference here — rather than as a forked
+/// `build_*_pipeline` + parallel cache per effect — is what lets the crossfade
+/// and orb paths (and every No.14+ effect) share a single pipeline builder and
+/// cache (#24). A new effect reuses a variant or adds one; it never forks the
+/// builder.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+enum BindShape {
+    /// `from`/`to` textures (0, 1), sampler (2), `Params` uniform (3). No.0
+    /// crossfade and any plain `(from, to, t)` effect.
+    Crossfade,
+    /// `Crossfade` plus the `OrbArray` uniform (4). No.13 orb-dissolve.
+    Orb,
+}
+
+impl BindShape {
+    /// The bind-group-layout entries for this shape, in binding order.
+    fn bind_group_layout_entries(self) -> Vec<wgpu::BindGroupLayoutEntry> {
+        let mut entries = vec![
+            texture_entry(0),
+            texture_entry(1),
+            sampler_entry(2),
+            uniform_entry(3),
+        ];
+        if matches!(self, BindShape::Orb) {
+            // Orb-dissolve's extra uniform: the live orb array (binding 4).
+            entries.push(uniform_entry(4));
+        }
+        entries
+    }
+}
+
 /// Per-dimension GPU resources reused across same-sized frames (issue #13): the
 /// uploaded `from`/`to` textures, the render target, and the padded read-back
 /// buffer. Reallocating these every frame is the other half of the per-frame
@@ -135,11 +170,11 @@ pub struct GpuRenderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
     adapter_name: String,
-    /// Crossfade-style pipelines, keyed by shader source.
-    pipeline_cache: RefCell<HashMap<String, CachedPipeline>>,
-    /// Orb-dissolve pipelines, keyed by shader source (separate bind-group
-    /// layout from the crossfade path, so a separate cache).
-    orb_pipeline_cache: RefCell<HashMap<String, CachedPipeline>>,
+    /// Render pipelines, keyed by `(shader source, bind-group-layout shape)`.
+    /// The crossfade and orb paths share this one cache; the [`BindShape`]
+    /// disambiguates their bind-group layouts (the orb path binds an extra orb
+    /// uniform), so a shader never reuses the wrong layout. (#13, unified in #24.)
+    pipeline_cache: RefCell<HashMap<(String, BindShape), CachedPipeline>>,
     /// Per-size resources for the crossfade path, keyed by `(width, height)`.
     sized_cache: RefCell<HashMap<(u32, u32), SizedResources>>,
     /// Per-size resources for the orb path, keyed by `(width, height)`.
@@ -175,7 +210,6 @@ impl GpuRenderer {
             queue,
             adapter_name,
             pipeline_cache: RefCell::new(HashMap::new()),
-            orb_pipeline_cache: RefCell::new(HashMap::new()),
             sized_cache: RefCell::new(HashMap::new()),
             orb_sized_cache: RefCell::new(HashMap::new()),
         })
@@ -186,56 +220,59 @@ impl GpuRenderer {
         &self.adapter_name
     }
 
-    /// Live entry counts of the four resource caches, in the order
-    /// `(crossfade pipelines, orb pipelines, crossfade sizes, orb sizes)`.
+    /// Live entry counts of the resource caches, in the order
+    /// `(pipelines, crossfade sizes, orb sizes)`. The single pipeline cache holds
+    /// one entry per distinct `(shader source, layout shape)`, so a clip that
+    /// drives both the crossfade and orb paths leaves exactly two pipelines.
     /// Exposed for the cache-effectiveness test (issue #13): rendering a clip of
     /// many frames at one size with one shader must leave exactly one pipeline
-    /// and one sized entry, proving compilation/allocation stayed off the
-    /// per-frame path.
+    /// per path and one sized entry, proving compilation/allocation stayed off
+    /// the per-frame path.
     #[cfg(test)]
-    fn cache_sizes(&self) -> (usize, usize, usize, usize) {
+    fn cache_sizes(&self) -> (usize, usize, usize) {
         (
             self.pipeline_cache.borrow().len(),
-            self.orb_pipeline_cache.borrow().len(),
             self.sized_cache.borrow().len(),
             self.orb_sized_cache.borrow().len(),
         )
     }
 
-    /// Get-or-build the crossfade-path pipeline for `shader_wgsl`, compiling the
-    /// shader and pipeline only on first use. The closure runs at most once per
-    /// distinct shader source for the life of the renderer.
-    fn crossfade_pipeline<R>(&self, shader_wgsl: &str, f: impl FnOnce(&CachedPipeline) -> R) -> R {
+    /// Get-or-build the pipeline for `(shader_wgsl, shape)`, compiling the shader
+    /// and pipeline only on first use of that pair. The crossfade and orb paths
+    /// share this one cache (and builder); `shape` selects the bind-group layout
+    /// so a shader never reuses the wrong one. The closure runs at most once per
+    /// distinct `(shader source, shape)` for the life of the renderer.
+    ///
+    /// A new effect (No.14+) reuses an existing [`BindShape`] or adds a variant —
+    /// it does **not** fork a parallel `build_*_pipeline` / pipeline cache (#24).
+    fn pipeline<R>(
+        &self,
+        shader_wgsl: &str,
+        shape: BindShape,
+        f: impl FnOnce(&CachedPipeline) -> R,
+    ) -> R {
         let mut cache = self.pipeline_cache.borrow_mut();
         let entry = cache
-            .entry(shader_wgsl.to_owned())
-            .or_insert_with(|| self.build_crossfade_pipeline(shader_wgsl));
+            .entry((shader_wgsl.to_owned(), shape))
+            .or_insert_with(|| self.build_pipeline(shader_wgsl, shape));
         f(entry)
     }
 
-    /// Compile the crossfade-style pipeline (binding 0/1 textures, 2 sampler, 3
-    /// uniform `Params`). Called once per shader by [`Self::crossfade_pipeline`].
-    fn build_crossfade_pipeline(&self, shader_wgsl: &str) -> CachedPipeline {
+    /// Compile the render pipeline for `(shader_wgsl, shape)`: a sampler, the
+    /// shape's bind-group layout, the shader module, and the full-screen-triangle
+    /// pipeline. Called once per `(shader, shape)` by [`Self::pipeline`].
+    fn build_pipeline(&self, shader_wgsl: &str, shape: BindShape) -> CachedPipeline {
         let format = wgpu::TextureFormat::Rgba8Unorm;
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("additive-sampler"),
             ..Default::default()
         });
+        let entries = shape.bind_group_layout_entries();
         let bind_group_layout =
             self.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("additive-bgl"),
-                    entries: &[
-                        texture_entry(0),
-                        texture_entry(1),
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                            count: None,
-                        },
-                        uniform_entry(3),
-                    ],
+                    entries: &entries,
                 });
         let shader = self
             .device
@@ -294,63 +331,6 @@ impl GpuRenderer {
                 multiview_mask: None,
                 cache: None,
             })
-    }
-
-    /// Get-or-build the orb-path pipeline for `shader_wgsl` (binding 0/1 textures,
-    /// 2 sampler, 3 `OrbParams`, 4 `OrbArray`). Compiled once per shader source.
-    fn orb_pipeline<R>(&self, shader_wgsl: &str, f: impl FnOnce(&CachedPipeline) -> R) -> R {
-        let mut cache = self.orb_pipeline_cache.borrow_mut();
-        let entry = cache
-            .entry(shader_wgsl.to_owned())
-            .or_insert_with(|| self.build_orb_pipeline(shader_wgsl));
-        f(entry)
-    }
-
-    /// Compile the orb-dissolve pipeline. Called once per shader by
-    /// [`Self::orb_pipeline`].
-    fn build_orb_pipeline(&self, shader_wgsl: &str) -> CachedPipeline {
-        let format = wgpu::TextureFormat::Rgba8Unorm;
-        let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("additive-orb-sampler"),
-            ..Default::default()
-        });
-        let bind_group_layout =
-            self.device
-                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("additive-orb-bgl"),
-                    entries: &[
-                        texture_entry(0),
-                        texture_entry(1),
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 2,
-                            visibility: wgpu::ShaderStages::FRAGMENT,
-                            ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
-                            count: None,
-                        },
-                        uniform_entry(3),
-                        uniform_entry(4),
-                    ],
-                });
-        let shader = self
-            .device
-            .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("additive-orb-shader"),
-                source: wgpu::ShaderSource::Wgsl(shader_wgsl.into()),
-            });
-        let pipeline_layout = self
-            .device
-            .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("additive-orb-pl"),
-                bind_group_layouts: &[Some(&bind_group_layout)],
-                immediate_size: 0,
-            });
-        let pipeline =
-            self.build_render_pipeline("additive-orb-pipeline", &pipeline_layout, &shader, format);
-        CachedPipeline {
-            pipeline,
-            bind_group_layout,
-            sampler,
-        }
     }
 
     /// Get-or-build the per-size resources for the given `cache`, allocating the
@@ -468,10 +448,10 @@ impl GpuRenderer {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
-        // Pipeline (shader compile) cached per shader source; textures and the
-        // read-back buffer cached per size. Only the texture contents and the
-        // tiny uniform/bind group are rebuilt per frame (issue #13).
-        self.crossfade_pipeline(shader_wgsl, |cached| {
+        // Pipeline (shader compile) cached per (shader, layout shape); textures
+        // and the read-back buffer cached per size. Only the texture contents and
+        // the tiny uniform/bind group are rebuilt per frame (issue #13).
+        self.pipeline(shader_wgsl, BindShape::Crossfade, |cached| {
             Self::sized_resources(
                 &self.sized_cache,
                 &self.device,
@@ -524,8 +504,11 @@ impl GpuRenderer {
     /// wipe-front position in the positive-axis sense, `dir_code` = 0 lr / 1 rl /
     /// 2 tb / 3 bt). At most [`MAX_ORBS`] orbs are used.
     ///
-    /// This is a deliberate sibling of `render` (not a generalization of it) so
-    /// the No.0 crossfade pipeline — and its strict parity test — is untouched.
+    /// This is a deliberate sibling of `render` (not a generalization of it): the
+    /// two share one pipeline builder (keyed by [`BindShape`], #24) but keep
+    /// separate bodies, so the No.0 crossfade path — and its strict parity test —
+    /// is byte-for-byte untouched (`BindShape::Crossfade` produces the exact same
+    /// layout as before).
     #[allow(clippy::too_many_arguments)]
     pub fn render_orbs(
         &self,
@@ -586,11 +569,11 @@ impl GpuRenderer {
                 usage: wgpu::BufferUsages::UNIFORM,
             });
 
-        // Pipeline (shader compile) cached per shader source; textures and the
-        // read-back buffer cached per size. The orb path uses its own caches
-        // because its bind-group layout (binding 3/4 uniforms) differs from the
-        // crossfade path (issue #13).
-        self.orb_pipeline(shader_wgsl, |cached| {
+        // Pipeline (shader compile) cached per (shader, layout shape) in the
+        // shared cache; the orb path's `BindShape::Orb` adds binding 4 (the orb
+        // array) on top of the crossfade layout. Textures and the read-back
+        // buffer keep their own per-size cache (issue #13).
+        self.pipeline(shader_wgsl, BindShape::Orb, |cached| {
             Self::sized_resources(
                 &self.orb_sized_cache,
                 &self.device,
@@ -763,6 +746,17 @@ fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
             has_dynamic_offset: false,
             min_binding_size: None,
         },
+        count: None,
+    }
+}
+
+/// A non-filtering sampler bind-group-layout entry, fragment-visible. Pairs with
+/// the non-filtering [`texture_entry`]s (we sample at exact pixel centers).
+fn sampler_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
         count: None,
     }
 }
@@ -999,13 +993,12 @@ mod tests {
             let _ = renderer.render_orbs(&from, &to, ORB_DISSOLVE_WGSL, t, &orbs, front, code);
         }
 
-        let (cf_pipes, orb_pipes, cf_sizes, orb_sizes) = renderer.cache_sizes();
-        eprintln!(
-            "after 16-frame clip: cf_pipes={cf_pipes} orb_pipes={orb_pipes} \
-             cf_sizes={cf_sizes} orb_sizes={orb_sizes}"
+        let (pipes, cf_sizes, orb_sizes) = renderer.cache_sizes();
+        eprintln!("after 16-frame clip: pipes={pipes} cf_sizes={cf_sizes} orb_sizes={orb_sizes}");
+        assert_eq!(
+            pipes, 2,
+            "crossfade and orb shaders must each compile exactly once (2 in the shared cache)"
         );
-        assert_eq!(cf_pipes, 1, "crossfade shader must compile exactly once");
-        assert_eq!(orb_pipes, 1, "orb shader must compile exactly once");
         assert_eq!(cf_sizes, 1, "crossfade size must allocate exactly once");
         assert_eq!(orb_sizes, 1, "orb size must allocate exactly once");
 
@@ -1019,18 +1012,11 @@ mod tests {
         let (front2, code2) = OrbDissolve::sweep_params(&cfg, 0.5);
         let _ = renderer.render_orbs(&from2, &to2, ORB_DISSOLVE_WGSL, 0.5, &orbs2, front2, code2);
 
-        let (cf_pipes, orb_pipes, cf_sizes, orb_sizes) = renderer.cache_sizes();
-        eprintln!(
-            "after second size: cf_pipes={cf_pipes} orb_pipes={orb_pipes} \
-             cf_sizes={cf_sizes} orb_sizes={orb_sizes}"
-        );
+        let (pipes, cf_sizes, orb_sizes) = renderer.cache_sizes();
+        eprintln!("after second size: pipes={pipes} cf_sizes={cf_sizes} orb_sizes={orb_sizes}");
         assert_eq!(
-            cf_pipes, 1,
-            "second size must not recompile the crossfade shader"
-        );
-        assert_eq!(
-            orb_pipes, 1,
-            "second size must not recompile the orb shader"
+            pipes, 2,
+            "second size must not recompile either shader (still 2 pipelines)"
         );
         assert_eq!(
             cf_sizes, 2,
@@ -1118,8 +1104,8 @@ mod tests {
         let b_cached = renderer.render(&from_b, &to_b, CROSSFADE_WGSL, 0.7);
 
         // Each cache entry must exist exactly once (reuse really happened).
-        let (cf_pipes, _, cf_sizes, _) = renderer.cache_sizes();
-        assert_eq!(cf_pipes, 1, "both frames must share one cached pipeline");
+        let (pipes, cf_sizes, _) = renderer.cache_sizes();
+        assert_eq!(pipes, 1, "both frames must share one cached pipeline");
         assert_eq!(cf_sizes, 1, "both frames must share one cached size");
 
         // Oracle: a brand-new renderer that has never seen frame A's inputs, so
@@ -1196,11 +1182,8 @@ mod tests {
         let b_cached = orb_frame(&renderer, &from_b, &to_b, 0.7);
 
         // The orb caches must each hold exactly one entry (reuse really happened).
-        let (_, orb_pipes, _, orb_sizes) = renderer.cache_sizes();
-        assert_eq!(
-            orb_pipes, 1,
-            "both frames must share one cached orb pipeline"
-        );
+        let (pipes, _, orb_sizes) = renderer.cache_sizes();
+        assert_eq!(pipes, 1, "both frames must share one cached orb pipeline");
         assert_eq!(orb_sizes, 1, "both frames must share one cached orb size");
 
         // Oracle: a brand-new renderer that has never seen frame A's inputs, so
@@ -1266,19 +1249,19 @@ mod tests {
 
         // First source compiles -> one pipeline.
         let _ = renderer.render(&from, &to, CROSSFADE_WGSL, 0.5);
-        let (cf_pipes, ..) = renderer.cache_sizes();
-        assert_eq!(cf_pipes, 1, "first shader source -> one pipeline");
+        let (pipes, ..) = renderer.cache_sizes();
+        assert_eq!(pipes, 1, "first shader source -> one pipeline");
 
         // Re-rendering the SAME source must not add a pipeline.
         let _ = renderer.render(&from, &to, CROSSFADE_WGSL, 0.6);
-        let (cf_pipes, ..) = renderer.cache_sizes();
-        assert_eq!(cf_pipes, 1, "same source re-render must not recompile");
+        let (pipes, ..) = renderer.cache_sizes();
+        assert_eq!(pipes, 1, "same source re-render must not recompile");
 
         // A distinct source string -> a second pipeline entry.
         let variant_out = renderer.render(&from, &to, &variant_wgsl, 0.5);
-        let (cf_pipes, ..) = renderer.cache_sizes();
+        let (pipes, ..) = renderer.cache_sizes();
         assert_eq!(
-            cf_pipes, 2,
+            pipes, 2,
             "a byte-distinct shader source must compile a second pipeline"
         );
 
@@ -1323,12 +1306,12 @@ mod tests {
 
         // Revisit A: must reuse, not grow to three.
         let _ = renderer.render(&from_a, &to_a, CROSSFADE_WGSL, 0.6);
-        let (cf_pipes, .., cf_sizes, _) = renderer.cache_sizes();
-        eprintln!("after A,B,A: cf_pipes={cf_pipes} cf_sizes={cf_sizes}");
+        let (pipes, cf_sizes, _) = renderer.cache_sizes();
+        eprintln!("after A,B,A: pipes={pipes} cf_sizes={cf_sizes}");
         assert_eq!(
             cf_sizes, 2,
             "revisiting size A must reuse its entry, not allocate a third"
         );
-        assert_eq!(cf_pipes, 1, "one shader source -> still one pipeline");
+        assert_eq!(pipes, 1, "one shader source -> still one pipeline");
     }
 }
