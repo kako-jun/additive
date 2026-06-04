@@ -371,7 +371,7 @@ impl OrbDissolve {
 }
 
 #[cfg(feature = "gpu")]
-impl Transition for OrbDissolve {
+impl crate::additive::Additive for OrbDissolve {
     fn designation(&self) -> &'static str {
         "No.13"
     }
@@ -383,13 +383,16 @@ impl Transition for OrbDissolve {
     fn description(&self) -> &'static str {
         "A band of orbs sweeps across, wiping the base from `from` (ahead) to `to` (behind), seam hidden in the band."
     }
+}
 
+#[cfg(feature = "gpu")]
+impl Transition for OrbDissolve {
     fn render_cpu(&self, from: &RgbaImage, to: &RgbaImage, t: f32) -> RgbaImage {
         self.render_cpu_cfg(from, to, t, &OrbConfig::default())
     }
 
-    fn shader_wgsl(&self) -> &'static str {
-        ORB_DISSOLVE_WGSL
+    fn shader_wgsl(&self) -> Option<&'static str> {
+        Some(ORB_DISSOLVE_WGSL)
     }
 }
 

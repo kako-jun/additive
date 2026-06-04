@@ -1,25 +1,33 @@
-//! ADDITIVE-13 — pure transition-rendering core.
+//! ADDITIVE-13 — pure rendering core for the "additive" series.
 //!
-//! ADDITIVE-13 is a *series of image transitions* ("additives"). Every additive
-//! is a transition between two same-sized images, expressed as a single pure
-//! function of normalized time `t` in `0.0..=1.0`:
+//! ADDITIVE-13 is a *catalogue of image effects* ("additives"). Each additive
+//! shares an [`Additive`] identity (an E-number designation + a stable name) and
+//! is rendered as one of two kinds:
 //!
-//! ```text
-//! (from, to, t) -> RGBA frame
-//! ```
+//! - a [`Transition`] — a two-image time function `(from, to, t) -> RGBA frame`,
+//!   `t` in `0.0..=1.0` (No.0 crossfade, No.13 orb-dissolve, …); or
+//! - a [`Generator`] — source synthesis from zero or one image (the parts /
+//!   material generators #19/#20/#21), which has no meaningful `to`.
 //!
-//! See [`Transition`] for the contract. The renderer in this crate is the
-//! **reference** CPU path; the production renderer is wgpu (Rust + WGSL), shared
-//! by the native CLI and the browser so both produce identical output (issue #1).
+//! The catalogue ([`all`] / [`by_name`]) returns the [`AdditiveItem`] union so a
+//! caller can list every entry uniformly yet drive the right render path. The
+//! renderer in this crate is the **reference** CPU path; the production renderer
+//! is wgpu (Rust + WGSL), shared by the native CLI and the browser so both
+//! produce identical output (issue #1).
 
+pub mod additive;
+pub mod generator;
 #[cfg(feature = "gpu")]
 pub mod gpu;
 pub mod transition;
 pub mod transitions;
 
+pub use additive::{all, by_name, Additive, AdditiveItem};
+pub use generator::Generator;
+pub use transition::Transition;
+
 #[cfg(feature = "gpu")]
 pub use gpu::{GpuOrb, GpuRenderer};
-pub use transition::{all, by_name, Transition};
 
 #[cfg(feature = "gpu")]
 pub use transitions::orb_dissolve::OrbDissolve;

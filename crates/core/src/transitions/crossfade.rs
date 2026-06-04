@@ -2,6 +2,7 @@
 
 use image::RgbaImage;
 
+use crate::additive::Additive;
 use crate::transition::Transition;
 
 /// WGSL production shader for [`Crossfade`]. Mirrors [`Crossfade::render_cpu`]
@@ -15,7 +16,7 @@ pub const CROSSFADE_WGSL: &str = include_str!("crossfade.wgsl");
 /// verified against.
 pub struct Crossfade;
 
-impl Transition for Crossfade {
+impl Additive for Crossfade {
     fn designation(&self) -> &'static str {
         "No.0"
     }
@@ -27,7 +28,9 @@ impl Transition for Crossfade {
     fn description(&self) -> &'static str {
         "Linear cross-dissolve between the two images."
     }
+}
 
+impl Transition for Crossfade {
     fn render_cpu(&self, from: &RgbaImage, to: &RgbaImage, t: f32) -> RgbaImage {
         debug_assert_eq!(
             from.dimensions(),
@@ -47,8 +50,8 @@ impl Transition for Crossfade {
     }
 
     #[cfg(feature = "gpu")]
-    fn shader_wgsl(&self) -> &'static str {
-        CROSSFADE_WGSL
+    fn shader_wgsl(&self) -> Option<&'static str> {
+        Some(CROSSFADE_WGSL)
     }
 }
 

@@ -10,7 +10,7 @@ mod video;
 use std::path::{Path, PathBuf};
 
 use additive_core::transitions::orb_dissolve::{OrbConfig, OrbDirection};
-use additive_core::{all, by_name, timeline, GpuRenderer, OrbDissolve, Transition};
+use additive_core::{all, by_name, timeline, AdditiveItem, GpuRenderer, OrbDissolve, Transition};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use image::imageops::FilterType;
@@ -200,14 +200,19 @@ impl FrameRenderer {
                 }
             }
             FrameRenderer::Gpu(gpu) => {
+                // Built-in transitions all carry a WGSL shader; a shaderless
+                // transition can only render on the CPU path.
+                let shader = tr
+                    .shader_wgsl()
+                    .expect("GPU render path requires a WGSL shader; this transition exposes none");
                 // No.13 orb-dissolve drives the orb-array GPU path; everything
                 // else uses the plain from/to/t crossfade-style pipeline.
                 if is_orb {
                     let orbs = OrbDissolve::gpu_orbs(from, orb_cfg, t);
                     let (front, code) = OrbDissolve::sweep_params(orb_cfg, t);
-                    gpu.render_orbs(from, to, tr.shader_wgsl(), t, &orbs, front, code)
+                    gpu.render_orbs(from, to, shader, t, &orbs, front, code)
                 } else {
-                    gpu.render(from, to, tr.shader_wgsl(), t)
+                    gpu.render(from, to, shader, t)
                 }
             }
         }
@@ -218,12 +223,12 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     if cli.list {
-        for tr in all() {
+        for item in all() {
             println!(
                 "{:>6}  {:<14} {}",
-                tr.designation(),
-                tr.name(),
-                tr.description()
+                item.designation(),
+                item.name(),
+                item.description()
             );
         }
         return Ok(());
@@ -235,8 +240,21 @@ fn main() -> Result<()> {
     let from_path = cli.from.context("--from is required")?;
     let to_path = cli.to.context("--to is required")?;
 
-    let tr = by_name(&cli.transition)
-        .with_context(|| format!("unknown transition '{}'; run --list", cli.transition))?;
+    let tr = match by_name(&cli.transition)
+        .with_context(|| format!("unknown additive '{}'; run --list", cli.transition))?
+    {
+        AdditiveItem::Transition(tr) => tr,
+        // Generators (#19/#20/#21) synthesize a frame rather than transitioning
+        // between two images; their CLI flow is not wired up yet. No built-in
+        // generator exists today, so this arm is unreachable in practice — but
+        // it keeps the union honest and fails loudly the moment one is added.
+        AdditiveItem::Generator(g) => bail!(
+            "'{}' ({}) is a generator, not a transition; the generator render \
+             flow is not wired into the CLI yet (see issues #19/#20/#21)",
+            g.name(),
+            g.designation()
+        ),
+    };
 
     let renderer = FrameRenderer::select(cli.renderer);
 
