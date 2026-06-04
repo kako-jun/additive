@@ -10,8 +10,14 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
 - Initial scaffold (session549). Cargo workspace mirroring orber: `additive-core`
   (pure transition core, wasm-buildable), `additive` (CLI), `additive-wasm`
   (browser bindings).
-- `Transition` contract — `(from, to, t) -> RGBA frame` — with an E-number style
-  designation per additive.
+- Additive catalogue contract (#23): a shared `Additive` identity supertrait
+  (designation / name / description) with two render sub-contracts — `Transition`
+  (`(from, to, t) -> RGBA frame`) and `Generator` (`render(w, h, t, inputs)`, for
+  zero/one-image source synthesis: #19/#20/#21). `all()` / `by_name()` return the
+  `AdditiveItem` union so the catalogue lists every additive uniformly yet drives
+  the right render path. `shader_wgsl()` is `Option` on both contracts (a CPU-only
+  effect carries no GPU shader). No built-in generator ships yet — the type exists
+  so generators land without bending the transition shape.
 - `No.0 — crossfade`: the reference CPU renderer and parity oracle.
 - **wgpu renderer (native) behind the `gpu` feature (#1)**: `GpuRenderer` (wgpu 29)
   renders `No.0 crossfade` in WGSL on a headless GPU; CLI gains `--renderer cpu|gpu`
@@ -59,6 +65,13 @@ The format is based on Keep a Changelog, and this project adheres to Semantic Ve
   `CLAUDE.md` (JP), `DESIGN.md`.
 
 ### Changed
+- **`GpuRenderer` pipeline builder unified (#24, internal)**: the crossfade and
+  orb paths previously had forked `build_*_pipeline` functions and separate
+  pipeline caches; they now share one builder and one cache keyed by
+  `(shader source, BindShape)`, where `BindShape` encodes the only layout
+  difference (the orb path's extra orb-array uniform). No public API or output
+  change — verified byte-for-byte identical on a real GPU — but a No.14+ effect
+  now reuses or adds a `BindShape` variant instead of forking the builder.
 - **No.13 reworked from a global occlusion pulse to a conveyor sweep-wipe (#14)**:
   the earlier mechanism grew the orbs to cover the *whole* frame at `t≈0.5` and
   hard-swapped the base globally underneath. That read as a flash, not a wipe. The

@@ -40,7 +40,17 @@ pub fn render_frame(
         .ok_or_else(|| JsValue::from_str("invalid to buffer"))?;
     let frame = match by_name(name).ok_or_else(|| JsValue::from_str("unknown additive"))? {
         AdditiveItem::Transition(tr) => tr.render_cpu(&from, &to, t),
-        AdditiveItem::Generator(g) => g.render(width, height, t, &[from, to]),
+        // Generators (#19/#20/#21) synthesize from zero/one image with per-effect
+        // inputs that this two-image preview entry point can't express yet. No
+        // built-in generator exists, so this is unreachable today — but, like the
+        // CLI, fail loudly rather than guess the inputs. Wiring lands with the
+        // first real generator (it will likely revise this signature; see #4/#5).
+        AdditiveItem::Generator(g) => {
+            return Err(JsValue::from_str(&format!(
+                "'{}' is a generator; the generator render path is not wired into the wasm preview yet (see #19/#20/#21)",
+                g.name()
+            )));
+        }
     };
     Ok(frame.into_raw())
 }

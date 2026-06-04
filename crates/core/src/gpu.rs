@@ -21,12 +21,16 @@
 //! The WGSL supplied by a [`crate::Transition`] (see
 //! [`crate::transitions::crossfade`]) must expose `vs_main` / `fs_main` and bind:
 //!
-//! | group(0) binding | resource                         |
-//! |------------------|----------------------------------|
-//! | 0                | `from` texture (`texture_2d<f32>`) |
-//! | 1                | `to` texture (`texture_2d<f32>`)   |
-//! | 2                | sampler                          |
-//! | 3                | uniform `{ t: f32 }`             |
+//! | group(0) binding | resource                         | shape |
+//! |------------------|----------------------------------|-------|
+//! | 0                | `from` texture (`texture_2d<f32>`) | both |
+//! | 1                | `to` texture (`texture_2d<f32>`)   | both |
+//! | 2                | sampler                          | both |
+//! | 3                | uniform (`Params { t }` / `OrbParams`) | both |
+//! | 4                | uniform `OrbArray` (live orbs)   | orb only |
+//!
+//! Binding 4 is present only for the orb-dissolve path; which bindings a pipeline
+//! declares is selected by [`BindShape`] (`Crossfade` = 0..=3, `Orb` = 0..=4).
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -111,6 +115,11 @@ struct CachedPipeline {
 /// and orb paths (and every No.14+ effect) share a single pipeline builder and
 /// cache (#24). A new effect reuses a variant or adds one; it never forks the
 /// builder.
+///
+/// Invariant for new variants: [`Self::bind_group_layout_entries`] must list
+/// entries in ascending `binding` order and keep binding numbers consistent
+/// across shapes (binding `n` means the same resource everywhere), so the WGSL
+/// and the bind groups in `render` / `render_orbs` stay in lockstep.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 enum BindShape {
     /// `from`/`to` textures (0, 1), sampler (2), `Params` uniform (3). No.0
@@ -134,6 +143,14 @@ impl BindShape {
             entries.push(uniform_entry(4));
         }
         entries
+    }
+
+    /// Suffix for this shape's diagnostic resource labels (`""` / `"-orb"`).
+    fn label_suffix(self) -> &'static str {
+        match self {
+            BindShape::Crossfade => "",
+            BindShape::Orb => "-orb",
+        }
     }
 }
 
@@ -261,34 +278,43 @@ impl GpuRenderer {
     /// Compile the render pipeline for `(shader_wgsl, shape)`: a sampler, the
     /// shape's bind-group layout, the shader module, and the full-screen-triangle
     /// pipeline. Called once per `(shader, shape)` by [`Self::pipeline`].
+    ///
+    /// Resource labels carry the shape suffix (`""` / `"-orb"`) so the crossfade
+    /// and orb pipelines stay distinguishable in GPU validation logs / RenderDoc;
+    /// labels are diagnostic only and never affect the rendered output.
     fn build_pipeline(&self, shader_wgsl: &str, shape: BindShape) -> CachedPipeline {
         let format = wgpu::TextureFormat::Rgba8Unorm;
+        let tag = shape.label_suffix();
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("additive-sampler"),
+            label: Some(&format!("additive{tag}-sampler")),
             ..Default::default()
         });
         let entries = shape.bind_group_layout_entries();
         let bind_group_layout =
             self.device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                    label: Some("additive-bgl"),
+                    label: Some(&format!("additive{tag}-bgl")),
                     entries: &entries,
                 });
         let shader = self
             .device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("additive-shader"),
+                label: Some(&format!("additive{tag}-shader")),
                 source: wgpu::ShaderSource::Wgsl(shader_wgsl.into()),
             });
         let pipeline_layout = self
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("additive-pl"),
+                label: Some(&format!("additive{tag}-pl")),
                 bind_group_layouts: &[Some(&bind_group_layout)],
                 immediate_size: 0,
             });
-        let pipeline =
-            self.build_render_pipeline("additive-pipeline", &pipeline_layout, &shader, format);
+        let pipeline = self.build_render_pipeline(
+            &format!("additive{tag}-pipeline"),
+            &pipeline_layout,
+            &shader,
+            format,
+        );
         CachedPipeline {
             pipeline,
             bind_group_layout,

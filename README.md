@@ -79,7 +79,7 @@ strictly two-input transitions.
 ## Layout
 
 ```
-crates/core   additive-core — the Transition contract + reference renderer (wasm-buildable, no I/O)
+crates/core   additive-core — the Additive contract (Transition + Generator) + reference renderer (wasm-buildable, no I/O)
 crates/cli    additive      — the command-line tool (image I/O, encoding)
 crates/wasm   additive-wasm — browser bindings
 web/          Astro + Solid web app (planned)

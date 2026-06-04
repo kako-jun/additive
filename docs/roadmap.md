@@ -8,6 +8,10 @@
 - `additive-core` の CPU 経路はリファレンス／パリティオラクル（プロダクションではない）
 - No.13 は `orber-core` を git 依存で借りて玉を出す。orber に `--transition` は生やさない
 - アルファ出力は orber の PNG-in-MOV muxer（`movMuxer.ts`）流用。ffmpeg.wasm vp9-alpha は踏まない
+- **添加物は2種類（#23, session581）**: 共有 `Additive` 識別子（designation/name/description）の下に
+  `Transition: Additive`（`(from,to,t)->frame`）と `Generator: Additive`（`render(w,h,t,inputs)`＝0/1入力の
+  素材生成、#19/#20/#21 用）。`all()`/`by_name()` は `enum AdditiveItem` の union を返す。`shader_wgsl()` は
+  両契約とも `Option`。ジェネレータ実体は未実装＝型だけ先に確定（量産#8・配線#5 の前に抽象を決めた）
 
 ## 完了（scaffold, session549）
 
@@ -31,6 +35,18 @@
 - [ ] **#6 サブドメイン公開** — `additive.llll-ll.com`（CF Pages）
 - [ ] **#7 name-name 配線** — 透過 webm/mov を事前レンダして場面転換に流す
 - [ ] **#8 添加物拡充（umbrella）** — No.14+ にじみ / 光漏れ / グリッチ …
+
+## 完了（doctrine, session581）
+
+- [x] **#23 ジェネレータ抽象（規律4）** — `Transition` 固定契約 → `Additive` supertrait + `Transition`/`Generator`
+  + `enum AdditiveItem` union。3択（marker拡張/別trait/製品分割）から Option 2 採用。`shader_wgsl()` Option 化、
+  No.0/No.13 移行（parity 実機 byte 一致）、CLI/wasm 配線、Generator 契約 proof テスト2件（core 26→28）。
+  新ジェネレータ効果（#19/#20/#21）は別 Issue のまま＝型だけ先に作った。docs/overview.md・CLAUDE.md・本ファイル更新。
+- [x] **#24 pipeline ビルダー単一化（規律2/OCP）** — `build_crossfade_pipeline`/`build_orb_pipeline` →
+  単一 `build_pipeline(shader, BindShape)` + `(shader, BindShape)` キーの1キャッシュ。差を `enum BindShape { Crossfade, Orb }`
+  に閉じ込め、新効果は variant 追加だけ。`sampler_entry()` 抽出。render/render_orbs と sized cache は据え置き。
+  実機（Apple A18 Pro）で出力 byte 一致＝パリティ非破壊。gpu.rs 正味 -17 行。
+- 残 doctrine finding（低優先・該当 Issue 着手時）: F2 `orb_instances` の grid を pure helper に（#8 時）/ F3 CPU/WGSL parity helper 拡大 / 無限cache eviction（#5 Web GUI 時）。
 
 ## 参照
 
