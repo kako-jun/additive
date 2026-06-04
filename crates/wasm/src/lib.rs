@@ -4,7 +4,7 @@
 //! working preview from day one. The fast path is wgpu / WebGPU (#1, #4); when it
 //! lands, the same WGSL renders here and in the CLI, for identical output.
 
-use additive_core::{all, by_name};
+use additive_core::{all, by_name, AdditiveItem};
 use image::RgbaImage;
 use wasm_bindgen::prelude::*;
 
@@ -13,10 +13,12 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
-/// Render a single transition frame.
+/// Render a single additive frame.
 ///
 /// `from_rgba` / `to_rgba` are straight-alpha RGBA byte buffers of exactly
-/// `width * height * 4` bytes. Returns the rendered frame as RGBA bytes.
+/// `width * height * 4` bytes. Returns the rendered frame as RGBA bytes. For a
+/// transition both buffers are mixed by `t`; for a generator they are passed as
+/// the available source `inputs` (a zero-input generator ignores them).
 #[wasm_bindgen]
 pub fn render_frame(
     name: &str,
@@ -36,16 +38,19 @@ pub fn render_frame(
         .ok_or_else(|| JsValue::from_str("invalid from buffer"))?;
     let to = RgbaImage::from_raw(width, height, to_rgba.to_vec())
         .ok_or_else(|| JsValue::from_str("invalid to buffer"))?;
-    let tr = by_name(name).ok_or_else(|| JsValue::from_str("unknown transition"))?;
-    Ok(tr.render_cpu(&from, &to, t).into_raw())
+    let frame = match by_name(name).ok_or_else(|| JsValue::from_str("unknown additive"))? {
+        AdditiveItem::Transition(tr) => tr.render_cpu(&from, &to, t),
+        AdditiveItem::Generator(g) => g.render(width, height, t, &[from, to]),
+    };
+    Ok(frame.into_raw())
 }
 
-/// Newline-separated names of all built-in transitions.
+/// Newline-separated names of all built-in additives.
 #[wasm_bindgen]
 pub fn transitions() -> String {
     all()
         .iter()
-        .map(|t| t.name())
+        .map(|item| item.name())
         .collect::<Vec<_>>()
         .join("\n")
 }

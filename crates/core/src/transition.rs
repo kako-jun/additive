@@ -1,27 +1,18 @@
-//! The ADDITIVE-13 transition contract.
+//! The ADDITIVE-13 transition contract — the two-image time function.
 
 use image::RgbaImage;
 
-use crate::transitions::crossfade::Crossfade;
-#[cfg(feature = "gpu")]
-use crate::transitions::orb_dissolve::OrbDissolve;
+use crate::additive::Additive;
 
-/// A named transition effect — one "additive" in the series.
+/// A two-image transition — one "additive" in the series whose render shape is
+/// `(from, to, t) -> frame`.
 ///
-/// Each additive carries an E-number style [`designation`](Transition::designation)
-/// (a nod to パトレイバー 廃棄物13号 and food-additive E-numbers) and a stable
-/// kebab-case [`name`](Transition::name) used on the CLI and in the web GUI.
-pub trait Transition {
-    /// E-number style designation, e.g. `"No.13"`. The flagship orb-dissolve is
-    /// `No.13`.
-    fn designation(&self) -> &'static str;
-
-    /// Stable kebab-case identifier, e.g. `"orb-dissolve"`.
-    fn name(&self) -> &'static str;
-
-    /// One-line human description.
-    fn description(&self) -> &'static str;
-
+/// A transition is an [`Additive`] (it carries the shared
+/// designation/name/description identity) that additionally maps a `from`/`to`
+/// pair and a normalized time `t` to a frame. Source-synthesis effects that have
+/// no meaningful `to` use [`crate::Generator`] instead — they are not forced
+/// through this contract.
+pub trait Transition: Additive {
     /// Reference (CPU) render of the frame at time `t`.
     ///
     /// `from` and `to` must have identical dimensions; callers resize beforehand.
@@ -29,32 +20,20 @@ pub trait Transition {
     /// (#1) is checked against.
     fn render_cpu(&self, from: &RgbaImage, to: &RgbaImage, t: f32) -> RgbaImage;
 
-    /// WGSL fragment-shader body for the production (wgpu) render path.
+    /// WGSL fragment-shader body for the production (wgpu) render path, when the
+    /// transition has one.
     ///
     /// The shader is run by [`crate::gpu::GpuRenderer`] against a full-screen
     /// triangle. It must define a fragment entry point `fs_main` that samples the
     /// bound `from`/`to` textures and the `t` uniform, mixing them in **sRGB byte
     /// space without gamma conversion** so the result matches [`render_cpu`]
     /// channel-for-channel (see [`crate::gpu`] for the binding contract).
+    ///
+    /// Defaults to `None` so a CPU-only transition (tiny-skia only) is not forced
+    /// to carry a GPU shader it does not have; the CLI errors clearly if a
+    /// shaderless transition is asked to render on the GPU path.
     #[cfg(feature = "gpu")]
-    fn shader_wgsl(&self) -> &'static str;
-}
-
-/// All built-in transitions, in designation order.
-///
-/// No.13 orb-dissolve relies on the `orber-core` orb engine, which is pulled in
-/// only under the `gpu` feature, so it is registered only in that build. (The
-/// wasm / no-gpu build exposes just No.0 crossfade until the browser path lands.)
-pub fn all() -> Vec<Box<dyn Transition>> {
-    let transitions: Vec<Box<dyn Transition>> = vec![
-        Box::new(Crossfade),
-        #[cfg(feature = "gpu")]
-        Box::new(OrbDissolve),
-    ];
-    transitions
-}
-
-/// Look up a built-in transition by its kebab-case `name`.
-pub fn by_name(name: &str) -> Option<Box<dyn Transition>> {
-    all().into_iter().find(|t| t.name() == name)
+    fn shader_wgsl(&self) -> Option<&'static str> {
+        None
+    }
 }

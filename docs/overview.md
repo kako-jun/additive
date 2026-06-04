@@ -1,25 +1,44 @@
 # ADDITIVE-13 overview
 
-ADDITIVE-13 is a catalogue of image **transitions**. Each transition ("additive")
-maps two same-sized images and a normalized time `t` to a single RGBA frame:
+ADDITIVE-13 is a catalogue of image effects — "additives". Every additive shares
+an **identity** (an E-number style designation + a stable kebab-case name) and is
+one of two kinds:
 
-```
-(from, to, t in 0.0..=1.0) -> RGBA frame
-```
+- a **transition** — maps two same-sized images and a normalized time `t` to a
+  single RGBA frame:
 
-`t = 0` is pure `from`, `t = 1` is pure `to`. A clip is just that function sampled
-over a timeline.
+  ```
+  (from, to, t in 0.0..=1.0) -> RGBA frame
+  ```
+
+  `t = 0` is pure `from`, `t = 1` is pure `to`. A clip is just that function
+  sampled over a timeline.
+
+- a **generator** — *synthesizes* a frame from zero or one source image rather
+  than transitioning between two. It has no meaningful `to`, so it is **not**
+  forced through the transition contract (the parts/material generators on the
+  roadmap: fake-nyaa #19, typewriter parts #20, golden-ratio guide #21).
+
+In code (`additive-core`) this is a shared `Additive` supertrait carrying the
+identity, two sub-contracts — `Transition` and `Generator` — and an
+`AdditiveItem` union that the catalogue (`all()` / `by_name()`) returns, so a
+caller can list every additive uniformly yet drive the right render path. Both
+sub-contracts make the WGSL shader *optional* (`shader_wgsl() -> Option`), so a
+CPU-only effect is never made to carry a GPU shader it doesn't have. No built-in
+generator ships yet — the contract exists so #19/#20/#21 land without bending the
+transition shape.
 
 ## The additive catalogue
 
 Each additive has an E-number style designation and a stable kebab-case name:
 
-| Designation | Name           | Status      | Notes                                                        |
-| ----------- | -------------- | ----------- | ------------------------------------------------------------ |
-| No.0        | `crossfade`    | implemented | Linear cross-dissolve. Reference baseline + parity oracle.   |
-| No.13       | `orb-dissolve` | implemented | A band of color orbs (palette via orber-core) flows on a one-way conveyor and **sweeps across** the frame: ahead of the band the base is still `from`, behind it `to`, and the `from→to` seam rides hidden inside the band. Flagship. Knobs: `--count` / `--speed` / `--direction` / `--orb-size`. |
+| Designation | Name           | Kind       | Status      | Notes                                                        |
+| ----------- | -------------- | ---------- | ----------- | ------------------------------------------------------------ |
+| No.0        | `crossfade`    | transition | implemented | Linear cross-dissolve. Reference baseline + parity oracle.   |
+| No.13       | `orb-dissolve` | transition | implemented | A band of color orbs (palette via orber-core) flows on a one-way conveyor and **sweeps across** the frame: ahead of the band the base is still `from`, behind it `to`, and the `from→to` seam rides hidden inside the band. Flagship. Knobs: `--count` / `--speed` / `--direction` / `--orb-size`. |
 
-Later additives (ink-bleed, light-leak, glitch, …) plug into the same contract.
+Later transitions (ink-bleed, light-leak, glitch, …) plug into the `Transition`
+contract; the generators (#19/#20/#21) plug into the `Generator` contract.
 
 ## Renderer
 

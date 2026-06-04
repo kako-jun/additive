@@ -41,8 +41,10 @@ additive/
 └── crates/
     ├── core/               # additive-core: 純粋トランジションコア（wasm ビルド可・I/O 無し）
     │   └── src/
-    │       ├── lib.rs              # timeline() 等
-    │       ├── transition.rs       # trait Transition + by_name / all レジストリ
+    │       ├── lib.rs              # timeline() 等 + 各 trait/レジストリ re-export
+    │       ├── additive.rs         # trait Additive（共有識別子）+ enum AdditiveItem + all() / by_name() レジストリ
+    │       ├── transition.rs       # trait Transition: Additive（2入力時間関数 (from,to,t)->frame）
+    │       ├── generator.rs        # trait Generator: Additive（0/1入力の素材生成。#19/#20/#21 用、実装はまだ）
     │       └── transitions/
     │           ├── mod.rs
     │           └── crossfade.rs    # No.0 リファレンス（CPU、パリティオラクル）
@@ -62,8 +64,14 @@ additive/
 - **`additive-core` の CPU レンダラはリファレンス（パリティオラクル）**。プロダクション
   ではない。wgpu 出力をこれと突き合わせて検証する。web GUI には wgpu 着地まで CPU で
   暫定プレビューを出させる
-- **トランジション契約は `(from, to, t) -> RgbaImage`**。`from` と `to` は同寸法前提
-  （呼び出し側でリサイズ）。`t` は 0.0..=1.0 にクランプ
+- **添加物は2種類 = `Transition` と `Generator`、共有 `Additive` 識別子の下にある**（#23）。
+  `Additive`（designation/name/description）を supertrait にし、レンダ契約を分ける:
+  `Transition: Additive` = `(from, to, t) -> RgbaImage`（`from`/`to` 同寸法・`t` は 0.0..=1.0）、
+  `Generator: Additive` = `render(w, h, t, inputs: &[RgbaImage])`（0/1入力の素材生成。`to` が
+  無意味な #19/#20/#21 をトランジション契約に押し込まないため）。レジストリ `all()`/`by_name()` は
+  両者の union `enum AdditiveItem` を返し、`--list`・web ピッカーは `Additive` 経由で一様に列挙する。
+  `shader_wgsl()` は両契約とも `Option`（CPU専用効果に GPU シェーダを強要しない）。ジェネレータの
+  実体はまだ無く、契約だけ先に作った（型を作る今＝規律4）
 - **No.13 玉化ディゾルブは `orber-core` を依存して玉を借りる**（cluster→orb、再発明ゼロ）。
   orber-core は crates.io 未公開なので **git 依存**で引く（#2）。orber 本体に `--transition`
   は生やさない＝orber の「1入力スタイライザ」identity を濁さない
