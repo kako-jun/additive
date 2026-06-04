@@ -54,6 +54,10 @@ pub enum AdditiveItem {
 impl AdditiveItem {
     /// Borrow the entry as its shared [`Additive`] identity, for catalogue
     /// listing: designation / name / description regardless of the kind.
+    ///
+    /// Each arm upcasts `&dyn Transition` / `&dyn Generator` to the supertrait
+    /// `&dyn Additive` — trait upcasting, stable since Rust 1.86 (this crate's
+    /// `rust-version` is 1.87). Lowering MSRV below 1.86 would break this line.
     pub fn as_additive(&self) -> &dyn Additive {
         match self {
             AdditiveItem::Transition(t) => t.as_ref(),
