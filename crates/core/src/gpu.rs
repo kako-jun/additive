@@ -89,6 +89,40 @@ pub struct GpuOrb {
     pub color: [f32; 4],
 }
 
+/// Params block for the aqua-dissolve shader (No.14): `t`, the UV→isotropic aspect
+/// scales (so the spiral bleed disc is isotropic on non-square frames), the wipe-
+/// front position (`front`, positive-axis sense) and direction code (`dir_code`:
+/// 0 lr, 1 rl, 2 tb, 3 bt). Matches `struct Params` in `aqua_dissolve.wgsl`; padded
+/// to 32 bytes (field order/padding mirror the WGSL so binding 3 reads correctly).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AquaParams {
+    t: f32,
+    _pad_a: f32,
+    aspect_x: f32,
+    aspect_y: f32,
+    front: f32,
+    dir_code: f32,
+    _pad_b: f32,
+    _pad_c: f32,
+}
+
+/// Aqua-dissolve sweep uniform (binding 4): the spiral-bleed knobs the shader's
+/// `aqua_character` / `blurred_coverage` read. Matches `struct AquaSweep` in
+/// `aqua_dissolve.wgsl`; padded to 32 bytes.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AquaSweepUniform {
+    bleed: f32,
+    halo: f32,
+    bloom: f32,
+    seed: f32,
+    _pad0: f32,
+    _pad1: f32,
+    _pad2: f32,
+    _pad3: f32,
+}
+
 /// The orb-array uniform: a fixed-size `[GpuOrb; MAX_ORBS]` (unused tail zeroed).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -196,6 +230,8 @@ pub struct GpuRenderer {
     sized_cache: RefCell<HashMap<(u32, u32), SizedResources>>,
     /// Per-size resources for the orb path, keyed by `(width, height)`.
     orb_sized_cache: RefCell<HashMap<(u32, u32), SizedResources>>,
+    /// Per-size resources for the aqua-dissolve path, keyed by `(width, height)`.
+    aqua_sized_cache: RefCell<HashMap<(u32, u32), SizedResources>>,
 }
 
 impl GpuRenderer {
@@ -229,6 +265,7 @@ impl GpuRenderer {
             pipeline_cache: RefCell::new(HashMap::new()),
             sized_cache: RefCell::new(HashMap::new()),
             orb_sized_cache: RefCell::new(HashMap::new()),
+            aqua_sized_cache: RefCell::new(HashMap::new()),
         })
     }
 
@@ -644,6 +681,131 @@ impl GpuRenderer {
                         res,
                         "additive-orb-encoder",
                         "additive-orb-pass",
+                    )
+                },
+            )
+        })
+    }
+
+    /// Render one aqua-dissolve frame (No.14): same `from`/`to`/`t` contract as
+    /// [`render`](Self::render), plus the directional sweep state (`front` =
+    /// wipe-front position in the positive-axis sense, `dir_code` = 0 lr / 1 rl /
+    /// 2 tb / 3 bt) and the spiral-bleed knobs (`bleed` disc radius in shorter-axis
+    /// units, `halo`/`bloom` rim character, `seed` dither phase). The from→to seam
+    /// is dissolved by the shared `aquarelle` spiral bleed in the WGSL.
+    ///
+    /// Reuses [`BindShape::Orb`]'s bind-group layout — bindings 0..=4 with a uniform
+    /// at 4 — so it shares the unified pipeline builder (#24) without a new shape;
+    /// binding 3 carries [`AquaParams`] and binding 4 [`AquaSweepUniform`] instead
+    /// of the orb path's params/orb-array, which the layout's `min_binding_size:
+    /// None` uniform entries accept.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_aqua(
+        &self,
+        from: &RgbaImage,
+        to: &RgbaImage,
+        shader_wgsl: &str,
+        t: f32,
+        front: f32,
+        dir_code: u32,
+        bleed: f32,
+        halo: f32,
+        bloom: f32,
+        seed: f32,
+    ) -> RgbaImage {
+        assert_eq!(
+            from.dimensions(),
+            to.dimensions(),
+            "from and to must share dimensions"
+        );
+        let (width, height) = from.dimensions();
+        let t = t.clamp(0.0, 1.0);
+        if width == 0 || height == 0 {
+            return RgbaImage::new(width, height);
+        }
+
+        let short = width.min(height) as f32;
+        let params = AquaParams {
+            t,
+            _pad_a: 0.0,
+            aspect_x: width as f32 / short,
+            aspect_y: height as f32 / short,
+            front,
+            dir_code: dir_code as f32,
+            _pad_b: 0.0,
+            _pad_c: 0.0,
+        };
+        let params_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("additive-aqua-params"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        let sweep = AquaSweepUniform {
+            bleed,
+            halo,
+            bloom,
+            seed,
+            _pad0: 0.0,
+            _pad1: 0.0,
+            _pad2: 0.0,
+            _pad3: 0.0,
+        };
+        let sweep_buffer = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("additive-aqua-sweep"),
+                contents: bytemuck::bytes_of(&sweep),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+
+        self.pipeline(shader_wgsl, BindShape::Orb, |cached| {
+            Self::sized_resources(
+                &self.aqua_sized_cache,
+                &self.device,
+                width,
+                height,
+                "additive-aqua-target",
+                "additive-aqua-readback",
+                |res| {
+                    self.write_texture_data(&res.from_texture, from);
+                    self.write_texture_data(&res.to_texture, to);
+
+                    let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("additive-aqua-bg"),
+                        layout: &cached.bind_group_layout,
+                        entries: &[
+                            wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&res.from_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 1,
+                                resource: wgpu::BindingResource::TextureView(&res.to_view),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 2,
+                                resource: wgpu::BindingResource::Sampler(&cached.sampler),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 3,
+                                resource: params_buffer.as_entire_binding(),
+                            },
+                            wgpu::BindGroupEntry {
+                                binding: 4,
+                                resource: sweep_buffer.as_entire_binding(),
+                            },
+                        ],
+                    });
+
+                    self.run_pass_and_readback(
+                        &cached.pipeline,
+                        &bind_group,
+                        res,
+                        "additive-aqua-encoder",
+                        "additive-aqua-pass",
                     )
                 },
             )
@@ -1099,6 +1261,126 @@ mod tests {
         assert!(
             frac > 0.7,
             "gpu seam must be hidden under the orb band (covered {frac:.2})"
+        );
+    }
+
+    /// **aqua-dissolve GPU mechanism (No.14, #28).** The `render_aqua` path must run
+    /// on a real adapter and behave like a watercolor seam dissolve: t=0 ≈ `from`,
+    /// t=1 ≈ `to` (the front is off-frame at both ends), the `to` region grows
+    /// monotonically (the front sweeps one way), and mid-clip the from→to boundary
+    /// is *dissolved* — a wide band of mixed pixels along the flow axis, not a hard
+    /// line. No strict CPU↔GPU pixel parity is asserted (the spiral bleed's `sin`
+    /// differs by ULPs across rasterizers).
+    #[test]
+    fn gpu_aqua_dissolve_mechanism() {
+        use crate::transitions::aqua_dissolve::{aqua_dissolve_wgsl, AquaConfig, AquaDissolve};
+
+        let Some(renderer) = GpuRenderer::new() else {
+            eprintln!("SKIP gpu_aqua_dissolve_mechanism: no GPU adapter available");
+            return;
+        };
+        eprintln!(
+            "aqua-dissolve GPU test running on adapter: {}",
+            renderer.adapter_name()
+        );
+
+        let (w, h) = (96u32, 96u32);
+        // Solid red `from`, solid blue `to`: a pixel's color tells which side of the
+        // (dissolved) seam it lies on.
+        let mut from = RgbaImage::new(w, h);
+        for px in from.pixels_mut() {
+            *px = Rgba([220, 40, 40, 255]);
+        }
+        let mut to = RgbaImage::new(w, h);
+        for px in to.pixels_mut() {
+            *px = Rgba([40, 40, 220, 255]);
+        }
+        let cfg = AquaConfig::default();
+        let shader = aqua_dissolve_wgsl();
+
+        let render_at = |t: f32| -> RgbaImage {
+            let s = AquaDissolve::sweep_params(&cfg, t);
+            renderer.render_aqua(
+                &from, &to, shader, t, s.front, s.dir_code, s.bleed, s.halo, s.bloom, s.seed,
+            )
+        };
+
+        let mean_rgb_diff = |a: &RgbaImage, b: &RgbaImage| -> f32 {
+            let mut sum = 0u64;
+            let mut n = 0u64;
+            for (ap, bp) in a.pixels().zip(b.pixels()) {
+                for c in 0..3 {
+                    sum += ap.0[c].abs_diff(bp.0[c]) as u64;
+                    n += 1;
+                }
+            }
+            sum as f32 / n as f32
+        };
+        let to_fraction = |frame: &RgbaImage| -> f32 {
+            let mut to_px = 0u64;
+            let mut n = 0u64;
+            for ((p, f), g) in frame.pixels().zip(from.pixels()).zip(to.pixels()) {
+                let df: u32 = (0..3).map(|c| p.0[c].abs_diff(f.0[c]) as u32).sum();
+                let dg: u32 = (0..3).map(|c| p.0[c].abs_diff(g.0[c]) as u32).sum();
+                if dg < df {
+                    to_px += 1;
+                }
+                n += 1;
+            }
+            to_px as f32 / n as f32
+        };
+
+        // t=0: front off the entry edge -> ≈ from.
+        let f0 = render_at(0.0);
+        let d0_from = mean_rgb_diff(&f0, &from);
+        eprintln!("gpu aqua t=0: mean diff to from = {d0_from:.2}");
+        assert!(d0_from < 3.0, "gpu aqua t=0 should be ≈ from");
+
+        // t=1: front off the exit edge -> ≈ to.
+        let f1 = render_at(1.0);
+        let d1_to = mean_rgb_diff(&f1, &to);
+        eprintln!("gpu aqua t=1: mean diff to to = {d1_to:.2}");
+        assert!(d1_to < 3.0, "gpu aqua t=1 should be ≈ to");
+
+        // Monotone sweep.
+        let mut prev = -1.0f32;
+        for k in 0..=10 {
+            let t = k as f32 / 10.0;
+            let frac = to_fraction(&render_at(t));
+            eprintln!("gpu aqua t={t:.1}: to-fraction = {frac:.3}");
+            assert!(
+                frac >= prev - 0.05,
+                "gpu aqua to-fraction must not retreat: t={t} frac={frac} prev={prev}"
+            );
+            prev = frac;
+        }
+
+        // Mid-clip seam is dissolved: a wide band of mixed (neither pure red nor
+        // pure blue) pixels straddles the front (default lr ⇒ x). We count over the
+        // whole frame so the per-pixel dither (which scatters individual columns
+        // fully to from/to) averages out — a hard wipe would leave at most ~1 mixed
+        // column per row (≈ h mixed pixels); the watercolor band is several columns
+        // wide on average.
+        let mid = render_at(0.5);
+        let mut mixed = 0u32;
+        for (p, _f) in mid.pixels().zip(from.pixels()) {
+            let is_from = p.0[0] > 170 && p.0[2] < 90;
+            let is_to = p.0[2] > 170 && p.0[0] < 90;
+            if !is_from && !is_to {
+                mixed += 1;
+            }
+        }
+        eprintln!(
+            "gpu aqua seam dissolve: {mixed} mixed px of {} ({} per row)",
+            w * h,
+            mixed as f32 / h as f32
+        );
+        // > 3 mixed columns' worth per row on average ⇒ a genuine feathered band,
+        // not a 1-2 px hard edge.
+        assert!(
+            mixed > 3 * h,
+            "gpu aqua seam must dissolve across a wide watercolor band (got {mixed} mixed px, {} per row)",
+            mixed as f32 / h as f32
         );
     }
 

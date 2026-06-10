@@ -32,6 +32,9 @@ pub use gpu::{GpuOrb, GpuRenderer};
 #[cfg(feature = "gpu")]
 pub use transitions::orb_dissolve::OrbDissolve;
 
+#[cfg(feature = "gpu")]
+pub use transitions::aqua_dissolve::AquaDissolve;
+
 /// Yield the normalized time `t` for each frame of a clip.
 ///
 /// Produces `frames` values evenly spaced over the closed interval `[0.0, 1.0]`:

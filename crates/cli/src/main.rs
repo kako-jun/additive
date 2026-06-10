@@ -9,8 +9,11 @@ mod video;
 
 use std::path::{Path, PathBuf};
 
+use additive_core::transitions::aqua_dissolve::{AquaConfig, AquaDirection};
 use additive_core::transitions::orb_dissolve::{OrbConfig, OrbDirection};
-use additive_core::{all, by_name, timeline, AdditiveItem, GpuRenderer, OrbDissolve, Transition};
+use additive_core::{
+    all, by_name, timeline, AdditiveItem, AquaDissolve, GpuRenderer, OrbDissolve, Transition,
+};
 use anyhow::{bail, Context, Result};
 use clap::{Parser, ValueEnum};
 use image::imageops::FilterType;
@@ -49,6 +52,17 @@ impl From<Direction> for OrbDirection {
             Direction::Rl => OrbDirection::Rl,
             Direction::Tb => OrbDirection::Tb,
             Direction::Bt => OrbDirection::Bt,
+        }
+    }
+}
+
+impl From<Direction> for AquaDirection {
+    fn from(d: Direction) -> Self {
+        match d {
+            Direction::Lr => AquaDirection::Lr,
+            Direction::Rl => AquaDirection::Rl,
+            Direction::Tb => AquaDirection::Tb,
+            Direction::Bt => AquaDirection::Bt,
         }
     }
 }
@@ -129,6 +143,26 @@ struct Cli {
     /// Ignored by other transitions.
     #[arg(long, value_name = "MULT")]
     orb_size: Option<f32>,
+
+    /// No.14 aqua-dissolve: spiral-bleed width multiplier (how far the watercolor
+    /// seam wicks). `0` ⇒ a hard wipe. Ignored by other transitions.
+    #[arg(long, value_name = "MULT")]
+    bleed: Option<f32>,
+
+    /// No.14 aqua-dissolve: wet-rim saturation boost multiplier (`aqua_character`
+    /// halo). Ignored by other transitions.
+    #[arg(long, value_name = "MULT")]
+    halo: Option<f32>,
+
+    /// No.14 aqua-dissolve: rim white-lift multiplier (`aqua_character` bloom).
+    /// Ignored by other transitions.
+    #[arg(long, value_name = "MULT")]
+    bloom: Option<f32>,
+
+    /// No.14 aqua-dissolve: deterministic dither seed for the spiral bleed.
+    /// Ignored by other transitions.
+    #[arg(long, value_name = "SEED")]
+    seed: Option<f32>,
 }
 
 impl Cli {
@@ -147,6 +181,29 @@ impl Cli {
         }
         if let Some(orb_size) = self.orb_size {
             cfg.orb_size = orb_size;
+        }
+        cfg
+    }
+
+    /// Build the [`AquaConfig`] for No.14 from the CLI knobs, leaving any unset to
+    /// their defaults (so the out-of-the-box look is unchanged). `--direction` is
+    /// shared with No.13.
+    fn aqua_config(&self) -> AquaConfig {
+        let mut cfg = AquaConfig::default();
+        if let Some(direction) = self.direction {
+            cfg.direction = direction.into();
+        }
+        if let Some(bleed) = self.bleed {
+            cfg.bleed = bleed;
+        }
+        if let Some(halo) = self.halo {
+            cfg.halo = halo;
+        }
+        if let Some(bloom) = self.bloom {
+            cfg.bloom = bloom;
+        }
+        if let Some(seed) = self.seed {
+            cfg.seed = seed;
         }
         cfg
     }
@@ -187,14 +244,18 @@ impl FrameRenderer {
         to: &RgbaImage,
         t: f32,
         orb_cfg: &OrbConfig,
+        aqua_cfg: &AquaConfig,
     ) -> RgbaImage {
         let is_orb = tr.name() == "orb-dissolve";
+        let is_aqua = tr.name() == "aqua-dissolve";
         match self {
             FrameRenderer::Cpu => {
-                // No.13 threads the user's knobs through `render_cpu_cfg`; other
-                // transitions ignore the config and use the plain trait method.
+                // No.13 / No.14 thread the user's knobs through `render_cpu_cfg`;
+                // other transitions ignore the config and use the plain trait method.
                 if is_orb {
                     OrbDissolve.render_cpu_cfg(from, to, t, orb_cfg)
+                } else if is_aqua {
+                    AquaDissolve.render_cpu_cfg(from, to, t, aqua_cfg)
                 } else {
                     tr.render_cpu(from, to, t)
                 }
@@ -205,12 +266,18 @@ impl FrameRenderer {
                 let shader = tr
                     .shader_wgsl()
                     .expect("GPU render path requires a WGSL shader; this transition exposes none");
-                // No.13 orb-dissolve drives the orb-array GPU path; everything
-                // else uses the plain from/to/t crossfade-style pipeline.
+                // No.13 orb-dissolve drives the orb-array GPU path; No.14
+                // aqua-dissolve drives the spiral-bleed sweep path; everything else
+                // uses the plain from/to/t crossfade-style pipeline.
                 if is_orb {
                     let orbs = OrbDissolve::gpu_orbs(from, orb_cfg, t);
                     let (front, code) = OrbDissolve::sweep_params(orb_cfg, t);
                     gpu.render_orbs(from, to, shader, t, &orbs, front, code)
+                } else if is_aqua {
+                    let s = AquaDissolve::sweep_params(aqua_cfg, t);
+                    gpu.render_aqua(
+                        from, to, shader, t, s.front, s.dir_code, s.bleed, s.halo, s.bloom, s.seed,
+                    )
                 } else {
                     gpu.render(from, to, shader, t)
                 }
@@ -234,8 +301,9 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Build the No.13 config before consuming `cli`'s path fields below.
+    // Build the No.13 / No.14 configs before consuming `cli`'s path fields below.
     let orb_cfg = cli.orb_config();
+    let aqua_cfg = cli.aqua_config();
 
     let from_path = cli.from.context("--from is required")?;
     let to_path = cli.to.context("--to is required")?;
@@ -280,7 +348,7 @@ fn main() -> Result<()> {
             }
             std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
             for (i, t) in timeline(n).enumerate() {
-                let frame = renderer.render(tr.as_ref(), &from, &to, t, &orb_cfg);
+                let frame = renderer.render(tr.as_ref(), &from, &to, t, &orb_cfg, &aqua_cfg);
                 let path = dir.join(format!("frame_{i:04}.png"));
                 frame
                     .save(&path)
@@ -300,7 +368,16 @@ fn main() -> Result<()> {
                 fps: cli.fps,
                 alpha: cli.alpha,
             };
-            run_output(&opts, tr.as_ref(), &renderer, &from, &to, output, &orb_cfg)?;
+            run_output(
+                &opts,
+                tr.as_ref(),
+                &renderer,
+                &from,
+                &to,
+                output,
+                &orb_cfg,
+                &aqua_cfg,
+            )?;
         }
     }
 
@@ -318,6 +395,7 @@ struct OutputOpts {
 
 /// Dispatch a single `--output` by its extension: a `.png` debug frame, a baked
 /// `.mp4` / `.webm` clip, or (eventually) an alpha `.mov`.
+#[allow(clippy::too_many_arguments)]
 fn run_output(
     opts: &OutputOpts,
     tr: &dyn Transition,
@@ -326,6 +404,7 @@ fn run_output(
     to: &RgbaImage,
     output: &Path,
     orb_cfg: &OrbConfig,
+    aqua_cfg: &AquaConfig,
 ) -> Result<()> {
     let ext = output
         .extension()
@@ -350,7 +429,7 @@ fn run_output(
             .with_context(|| format!("encoding {} (duration out of range)", output.display()))?;
         let total = calc_frame_count(opts.duration_ms, opts.fps);
         render_video(output, codec, total, opts.fps, |_, t| {
-            renderer.render(tr, from, to, t, orb_cfg)
+            renderer.render(tr, from, to, t, orb_cfg, aqua_cfg)
         })
         .with_context(|| format!("encoding {}", output.display()))?;
         eprintln!(
@@ -363,7 +442,7 @@ fn run_output(
     }
 
     // Default / `.png`: single debug frame at --t.
-    let frame = renderer.render(tr, from, to, opts.t, orb_cfg);
+    let frame = renderer.render(tr, from, to, opts.t, orb_cfg, aqua_cfg);
     frame
         .save(output)
         .with_context(|| format!("writing {}", output.display()))?;
