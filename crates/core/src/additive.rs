@@ -14,6 +14,8 @@
 
 use crate::generator::Generator;
 use crate::transition::Transition;
+#[cfg(feature = "gpu")]
+use crate::transitions::aqua_dissolve::AquaDissolve;
 use crate::transitions::crossfade::Crossfade;
 #[cfg(feature = "gpu")]
 use crate::transitions::orb_dissolve::OrbDissolve;
@@ -83,14 +85,17 @@ impl AdditiveItem {
 
 /// All built-in additives, in designation order.
 ///
-/// No.13 orb-dissolve relies on the `orber-core` orb engine, which is pulled in
-/// only under the `gpu` feature, so it is registered only in that build. (The
-/// wasm / no-gpu build exposes just No.0 crossfade until the browser path lands.)
+/// No.13 orb-dissolve relies on the `orber-core` orb engine and No.14
+/// aqua-dissolve on the `aquarelle` spiral bleed; both are pulled in only under
+/// the `gpu` feature, so they are registered only in that build. (The wasm /
+/// no-gpu build exposes just No.0 crossfade until the browser path lands.)
 pub fn all() -> Vec<AdditiveItem> {
     let items: Vec<AdditiveItem> = vec![
         AdditiveItem::Transition(Box::new(Crossfade)),
         #[cfg(feature = "gpu")]
         AdditiveItem::Transition(Box::new(OrbDissolve)),
+        #[cfg(feature = "gpu")]
+        AdditiveItem::Transition(Box::new(AquaDissolve)),
     ];
     items
 }

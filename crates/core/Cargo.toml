@@ -19,9 +19,10 @@ crate-type = ["cdylib", "rlib"]
 # OFF (default): pure trait + CPU reference renderer. Keeps the wasm32 build
 # minimal and dependency-free beyond `image`.
 # ON: adds the wgpu (Rust + WGSL) production render path used by the native CLI,
-# plus orber-core (the orb engine) for No.13 orb-dissolve.
+# plus orber-core (the orb engine) for No.13 orb-dissolve and aquarelle (the
+# shared spiral bleed) for No.14 aqua-dissolve.
 default = []
-gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:orber-core"]
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck", "dep:orber-core", "dep:aquarelle"]
 
 [dependencies]
 image = { workspace = true }
@@ -31,3 +32,6 @@ bytemuck = { workspace = true, optional = true }
 # Orb engine for No.13 orb-dissolve. Behind `gpu` so the wasm (no-gpu) build,
 # which excludes orber-core's kmeans / getrandom stack, stays minimal.
 orber-core = { workspace = true, optional = true }
+# Shared spiral-bleed engine for No.14 aqua-dissolve. Direct dependency (#28): it
+# was previously only transitive via orber-core. Behind `gpu` so wasm stays minimal.
+aquarelle = { workspace = true, optional = true }

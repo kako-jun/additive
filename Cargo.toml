@@ -27,6 +27,10 @@ tempfile = "3"
 # orber-core: No.13 玉化ディゾルブ（#2）の玉エンジン供給元。crates.io 未公開なので
 # git 依存で引く。additive-core の gpu feature 内に閉じ込め、wasm(gpu 無し)を汚さない。
 orber-core = { git = "https://github.com/kako-jun/orber" }
+# aquarelle: No.14 aqua-dissolve（#28）の共有「にじみ」エンジン。AQUA_BLEED_WGSL +
+# aqua_blurred_coverage_cpu / aqua_character_cpu。crates.io 公開済み（0.3）。これまでは
+# orber-core 経由の間接依存だったが No.14 で直接使うので直接依存に格上げ。gpu feature 内。
+aquarelle = "0.3"
 
 [profile.release]
 lto = true
